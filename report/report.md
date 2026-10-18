@@ -1,3 +1,17 @@
+# Repository and How to Run the Code
+
+- **GitHub username:** Graf-J
+- **Repository:** [MLDS-Q4-490-Advanced-Algorithms-HW1](https://github.com/Graf-J/MLDS-Q4-490-Advanced-Algorithms-HW1) (public)
+
+The project uses [uv](https://docs.astral.sh/uv/) for Python (3.14) and its dependencies:
+
+```bash
+git clone https://github.com/Graf-J/MLDS-Q4-490-Advanced-Algorithms-HW1.git
+cd MLDS-Q4-490-Advanced-Algorithms-HW1
+uv sync            # creates .venv with the exact versions from uv.lock
+uv run jupyter lab # or open the notebooks in VS Code with the .venv kernel
+```
+
 # 2 Value and Policy Iteration
 
 ## 2.0 Model and Shared Environment
