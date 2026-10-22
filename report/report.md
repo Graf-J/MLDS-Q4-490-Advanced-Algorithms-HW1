@@ -350,3 +350,327 @@ The problem is small (201 states, 2 actions), and three independent methods alre
   - Time-varying (rush-hour) arrivals, where the threshold should change over the day.
   - A policy tuned for the wrong arrival distribution, to see how much reward it loses.
 - **Benchmark for learning algorithms:** since the exact optimum is known, check whether model-free methods (Q-learning, policy gradient) learn the threshold of 13 from simulation alone.
+
+# 3 Policy Gradient: Part 1
+
+## 3a) CartPole-v1
+
+**Notebook:** `3a_CartPole-v1.ipynb`. All figures are saved to `report/figures/3a_*.png` when the notebook runs. The four main trainings take about 12 min; the seed experiment takes another 45 min.
+
+**Method:** REINFORCE (vanilla policy gradient) without a baseline.
+- **Policy network:** $4 \to 20$ (ReLU) $\to 1$ logit, with $P(\text{push right} \mid s) = \sigma(\text{logit})$. During training, the action is sampled from this Bernoulli distribution.
+- **Update:** after every episode, I compute the discounted returns $G_t = \sum_k \gamma^k r_{t+k}$ and take one Adam step (learning rate 0.01) on the loss $-\sum_t \log \pi(a_t \mid s_t)\, G_t$. The returns are not normalised.
+- **Training:** 1,000 episodes. All four state variables start uniformly in $[-0.15, 0.15]$; this is wider than the Gymnasium default of $\pm 0.05$, so the policy also learns to recover from harder start states.
+- **Evaluation:** 500 episodes with the greedy action (push right iff $P > 0.5$). Episode $i$ starts from seed $i$, so every variant is evaluated on the same 500 start states.
+
+The function `train(env, policy, optimizer, episodes, gamma, scheduler=None, reward_shaping=False, seed=None)` supports two optional extensions. I add them one at a time on top of the baseline, which uses $\gamma = 0.95$ as the assignment requires:
+
+| Variant | $\gamma$ | Learning rate | Reward used for learning |
+|---|---|---|---|
+| Baseline | 0.95 | 0.01, constant | Environment reward (+1 per step) |
+| 1: bigger $\gamma$ | 0.995 | 0.01, constant | Environment reward |
+| 2: + scheduler | 0.995 | Cosine annealing 0.01 → 0.001 over the 1,000 episodes | Environment reward |
+| 3: + reward shaping | 0.995 | Cosine annealing 0.01 → 0.001 | $r_t \cdot \varphi(x_{t+1})$, with $\varphi$ the density of $\mathcal{N}(0, 0.7^2)$ |
+
+The shaped reward is $0.570$ with the cart at the center and $0.0016$ at the edge of the track ($|x| = 2.4$), so it pays more for staying centered. It is only used to compute the returns. **All reported rewards are the unshaped environment rewards**, so the variants are directly comparable.
+
+### Baseline: Training and Evaluation
+
+![Baseline training curve](figures/3a_training_baseline.png)
+
+- **Slow and unstable learning:** the moving average stays between 100 and 280 for 900 episodes and collapses once around episode 620. It reaches 475 (the threshold at which CartPole-v1 counts as solved) only at episode 991.
+- **During training, the cart leaving the track is the main failure:** this happens in 564 of the 1,000 episodes (Test 6).
+
+![Baseline evaluation histogram](figures/3a_histogram_baseline.png)
+
+**Evaluation:** all 500 greedy episodes reach the time limit of 500 steps, so **mean = 500.0, std = 0.0**.
+
+### Variants: Bigger $\gamma$, Scheduler, Reward Shaping
+
+![Training curves of all variants](figures/3a_training_variants.png)
+![Moving averages of all variants](figures/3a_moving_averages.png)
+
+| Variant | Solved at episode | Mean reward over training | Mean of last 100 | Evaluation mean ± std |
+|---|---|---|---|---|
+| Baseline ($\gamma = 0.95$) | 991 | 167.0 | 483.1 | 500.0 ± 0.0 |
+| $\gamma = 0.995$ | 669 | 349.2 | 481.4 | 500.0 ± 0.0 |
+| + scheduler | 523 | 333.2 | 486.9 | 500.0 ± 0.0 |
+| + reward shaping | **341** | **427.9** | **492.9** | 500.0 ± 0.0 |
+
+The evaluation histograms of the variants look the same as the baseline's: all 500 episodes reach 500 (`figures/3a_histogram_*.png`).
+
+- **Bigger $\gamma$:** learning is much faster (more than doubles the mean reward over training), but unstable. The moving average reaches 470 at episode 330 and then collapses to 240.
+- **+ Scheduler:** it still dips once while the learning rate is high (to 370 around episode 690). From episode ~780 on, the learning rate is small enough that it stays above 475, whereas $\gamma = 0.995$ alone collapses again at episode 900.
+- **+ Reward shaping:** fastest and most stable. From episode 300 on, almost every episode survives 500 steps (81% of all training episodes).
+
+**For seed 0, all four variants end with a perfect greedy policy.** The hyperparameters therefore improve **how fast and how reliably** training gets there, which the following experiment and Tests 5–6 confirm.
+
+### Robustness Across Training Seeds
+
+One training run can be lucky or unlucky, so I trained every variant with 4 more seeds and evaluated each policy greedily on 100 start states:
+
+![Mean training curve over 5 seeds](figures/3a_seeds.png)
+
+| Variant | Solved at (seeds 0–4) | Mean training reward | Mean of last 100 | Evaluation mean | Seeds with evaluation = 500 |
+|---|---|---|---|---|---|
+| Baseline ($\gamma = 0.95$) | 991, 525, –, –, – | 192.8 ± 60.4 | 292.4 ± 138.0 | 362.0 | 3/5 |
+| $\gamma = 0.995$ | 669, 333, 395, –, 662 | 286.3 ± 78.3 | 427.6 ± 127.6 | 462.2 | 4/5 |
+| + scheduler | 523, 753, 806, 319, 995 | 315.6 ± 65.3 | 483.6 ± 7.4 | 497.7 | 4/5 |
+| + reward shaping | 341, 327, 659, 494, 604 | **363.3 ± 48.3** | **494.6 ± 6.8** | **500.0** | **5/5** |
+
+(– = not solved within 1,000 episodes)
+
+- **Each addition helps on average.** Seed 0 was a lucky run for the baseline: it reaches 475 in only 2 of 5 seeds.
+- **The bigger $\gamma$ mostly speeds up learning.** The scheduler mostly makes the end of training reliable: the spread of the last-100 mean drops from ±127.6 to ±7.4.
+- **Reward shaping is the only variant that solves the task and reaches a perfect greedy policy for every seed.**
+
+### Edge Cases
+
+| Edge case | Handling |
+|---|---|
+| Invalid arguments | `episodes <= 0`, $\gamma \notin (0, 1]$ and a scheduler that wraps a different optimizer raise a `ValueError` (tested). $\gamma = 0$ is excluded because every return would then be the immediate reward of 1, which gives no signal about survival. |
+| Time limit (truncation at 500 steps) | Truncated episodes are treated like terminated ones: the return is cut off, even though the pole is still upright. With $\gamma = 0.95$, this only affects the last ~60 steps (Test 1). The limit also caps the evaluation: no reward can exceed 500, and std = 0 means "every episode reached the limit", not a bug. Tested: every reward of 500 is a truncation, every shorter episode a failure. |
+| Saturated evaluation | Since all variants reach 500 in the greedy evaluation, I compare them under harder conditions (Test 5) and over 5 seeds. |
+| Reward shaping must not make failing attractive | The shaped reward is strictly positive ($\geq 0.0016$) on the whole track, so surviving longer always increases the return. With a negative shaped reward (e.g. $1 - |x|$), ending the episode early could become optimal. Tested over the whole track. |
+| Shaped vs. true reward | The shaped reward is only used to compute the returns. All plots and tables use the environment reward. |
+| Scheduler | Stepped once per episode with `T_max = episodes`, so the learning rate ends exactly at 0.001 (tested). It is only stepped if one is passed. |
+| Scale of the returns | Returns reach up to $1/(1-\gamma)$: 20 for $\gamma = 0.95$ but 200 for $\gamma = 0.995$. Adam's update does not change when all gradients are scaled by a constant factor, so the same learning rate works for both without retuning. |
+| Start states | $\pm 0.15$ instead of the default $\pm 0.05$, for training and evaluation. A pole angle of 0.15 rad is already close to the failure angle of 0.21 rad. Starting at $\pm 0.2$ is tested in Test 5. |
+| Moving average at the start | The first 99 episodes average over fewer episodes. "Solved at" only counts full 100-episode windows. |
+| Reproducibility | `torch.manual_seed` and the seed of the first `env.reset` make training reproducible; training twice gives identical rewards (tested). |
+
+### Tests for Validating Correctness
+
+The tests are in the **Checks** section of `3a_CartPole-v1.ipynb` and run top to bottom with the notebook. They reuse the trained policies from above. Each test prints `[PASS]` / `[FAIL]`, and all of them pass.
+
+**1. Discounted returns and the credit horizon.** For a constant reward of 1, $G_t = \frac{1 - \gamma^{T-t}}{1 - \gamma}$ must hold, and with $\gamma = 1$, $G_t$ must equal the number of remaining steps. `rewards_to_returns` matches both exactly.
+
+![Discounting: weight of future rewards and returns of a failing episode](figures/3a_discounting.png)
+
+| $\gamma$ | Effective horizon $1/(1-\gamma)$ | $\gamma^{100}$ |
+|---|---|---|
+| 0.95 | 20 steps | 0.006 |
+| 0.99 | 100 steps | 0.366 |
+| 0.995 | 200 steps | 0.606 |
+
+With $\gamma = 0.95$, an episode that fails at step 400 has **the same returns as one that survives all 500 steps for the first ~340 steps**. A slow drift of the cart, which only causes a failure much later, is therefore barely punished. With $\gamma = 0.995$, the later failure lowers the return already at step 0 (173 vs. 183). Test 6 checks whether this explains the cart failures of the baseline.
+
+**2. Control experiments.** Three short trainings (300 episodes, $\gamma = 0.95$) that only differ in the learning signal:
+
+![Control experiments](figures/3a_control_experiments.png)
+
+| Training | First 100 episodes | Last 100 episodes | Expected |
+|---|---|---|---|
+| Normal | 50.9 | 123.2 | Clearly increases ✓ |
+| Learning rate 0 | 20.9 | 21.7 | Flat (the policy never changes) ✓ |
+| Negated reward (−1 per step) | 15.4 | 10.2 | Learns to fail as fast as possible ✓ |
+| *Reference:* random policy | 19.9 | | |
+| *Reference:* always push in one direction | 9.3 | | |
+
+With the reward flipped, the same code learns the opposite behaviour, getting close to the fastest simple way to fail. This shows that the gradient points in the right direction, and that the improvement in normal training comes from the learning signal, not from chance.
+
+**3. First 10 steps.** The trained baseline policy, with sampled actions as in training, starting with the pole leaning left ($\theta = -0.138$):
+
+| $t$ | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| $\theta$ | −0.138 | −0.141 | −0.139 | −0.132 | −0.131 | −0.126 | −0.116 | −0.101 | −0.092 | −0.078 |
+| $\dot\theta$ | −0.15 | 0.10 | 0.35 | 0.01 | 0.26 | 0.51 | 0.76 | 0.43 | 0.69 | 0.37 |
+| $P(\text{right})$ | 0.03 | 0.05 | 0.14 | 0.03 | 0.08 | 0.24 | **0.59** | 0.16 | 0.48 | 0.12 |
+| Action | L | L | R | L | L | L | R | L | R | L |
+
+- **The policy pushes towards the side the pole leans to** (left), in 9 of 10 steps, so the cart moves back under the pole. It only becomes unsure when the pole already swings back quickly ($\dot\theta = 0.76$ at $t = 6$).
+- **As a result, $|\theta|$ shrinks** from 0.138 to 0.071.
+- The shaped reward stays at 0.568–0.570, the maximum, since the cart stays near the center.
+
+**4. Does the policy react correctly to the pole?** I vary the pole angle $\theta$ and the angular velocity $\dot\theta$ one at a time, with all other state variables at 0:
+
+![Policy response to the pole angle and angular velocity](figures/3a_policy_response.png)
+
+- For all four policies, $P(\text{right})$ increases monotonically in both, is below 0.5 at the negative end and above 0.5 at the positive end (8/8 PASS). This is the physically correct direction: when the pole leans or falls to the right, the cart must move right.
+- **The $\gamma = 0.995$ policy is biased:** it pushes right with probability 0.96 even when the pole is perfectly upright. This explains its drift in Test 6.
+
+**5. Harder evaluation.** The greedy evaluation is saturated at 500, so I also evaluate each policy with sampled actions, and with wider start states ($\pm 0.2$):
+
+![Evaluation under harder conditions](figures/3a_robustness.png)
+
+| Variant | Greedy, $\pm 0.15$ | Sampled, $\pm 0.15$ | Greedy, $\pm 0.2$ |
+|---|---|---|---|
+| Baseline ($\gamma = 0.95$) | 500.0 ± 0.0 | 482.2 ± 75.5 | 500.0 ± 0.0 |
+| $\gamma = 0.995$ | 500.0 ± 0.0 | 475.0 ± 104.9 | 486.7 ± 78.2 |
+| + scheduler | 500.0 ± 0.0 | 484.6 ± 62.2 | 500.0 ± 0.0 |
+| + reward shaping | 500.0 ± 0.0 | **492.5 ± 52.8** | 500.0 ± 0.0 |
+
+The reward-shaping policy is the most robust to the noise of sampled actions. The $\gamma = 0.995$ policy, the one with the bias from Test 4, is the only one that fails from wider start states. Overall, the differences between the final policies of seed 0 are small.
+
+**6. Why do episodes end?** An episode ends when the pole falls ($|\theta| > 12°$), when the cart leaves the track ($|x| > 2.4$), or at the time limit. This checks the explanation from Test 1:
+
+![How training episodes end](figures/3a_end_reasons.png)
+
+| Variant | Training: cart left / pole fell / 500 steps | Sampled evaluation: cart / pole / 500 | Median max $|x|$ (sampled evaluation) |
+|---|---|---|---|
+| Baseline ($\gamma = 0.95$) | **564** / 333 / 103 | 0 / 33 / 467 | 0.66 |
+| $\gamma = 0.995$ | 190 / 276 / 534 | 0 / 27 / 473 | 1.25 |
+| + scheduler | 266 / 230 / 504 | 0 / 43 / 457 | 0.68 |
+| + reward shaping | **14** / 172 / 814 | 0 / 11 / 489 | **0.26** |
+
+![Cart position during one greedy episode](figures/3a_cart_position.png)
+
+- **During training, the explanation holds.** With $\gamma = 0.95$, the cart leaves the track in 564 episodes, and this is the most common outcome in 6 of the 10 blocks of 100 episodes. The pole is balanced, but the agent does not see that the cart drifts towards the edge. With $\gamma = 0.995$ there are only 190 such failures, and with reward shaping only 14.
+- **The final policies no longer leave the track** (0 cart failures in the evaluation). However, only reward shaping keeps the cart centered (median max $|x| = 0.26$). The $\gamma = 0.995$ policy drifts steadily to $x = -1.26$ within 500 steps, because of the bias from Test 4. It would probably leave the track in a longer episode; only the time limit hides this.
+- **Conclusion:** a longer horizon makes it possible to learn to avoid the drift, but does not guarantee it. Only reward shaping rewards staying centered explicitly, and only then is the learned policy centered.
+
+### Summary of 3a
+
+| | Baseline ($\gamma = 0.95$) | + $\gamma = 0.995$ | + scheduler | + reward shaping |
+|---|---|---|---|---|
+| Solved (5 seeds) | 2/5 | 4/5 | 5/5 | 5/5 |
+| Mean of last 100 episodes (5 seeds) | 292.4 ± 138.0 | 427.6 ± 127.6 | 483.6 ± 7.4 | 494.6 ± 6.8 |
+| Greedy evaluation, seed 0 | 500.0 ± 0.0 | 500.0 ± 0.0 | 500.0 ± 0.0 | 500.0 ± 0.0 |
+| Main effect | Short horizon: cart drifts off the track | Faster learning | Stable end of training | Fastest, most stable, cart centered |
+
+Plain REINFORCE with $\gamma = 0.95$ can solve CartPole, but slowly and unreliably. Each added hyperparameter fixes a specific weakness, and reward shaping has the largest effect.
+
+---
+
+## 3b) Pong-v5
+
+**Notebook:** `3b_Pong-v5.ipynb`. All figures are saved to `report/figures/3b_*.png`. Training takes about 100 min; afterwards the policy is saved every 250 episodes to `checkpoints/3b/reinforce/` together with the training log. With `RETRAIN = False` (default), the notebook loads this run instead of training again, so the evaluation and all checks can be rerun in about 30 min.
+
+**Method:** REINFORCE without a baseline, $\gamma = 0.99$.
+- **Actions:** only 2 (`RIGHT`) and 3 (`LEFT`), as required. In Pong they move the paddle **up** and **down** (Check 2), so I call them that.
+- **Input:** the difference of two consecutive frames, each preprocessed with the given `preprocess` function (80×80, 0/1). A single frame shows where the ball is, but not where it is going. The difference shows moving objects as a +1/−1 pair, which encodes the direction (Check 2).
+- **Policy network:** Conv(1→8, 3×3) → ReLU → MaxPool(2) → Conv(8→8, 3×3) → ReLU → MaxPool(2) → Linear(2592→64) → ReLU → Linear(64→1), giving the logit of $P(\text{down})$. Actions are sampled from this Bernoulli distribution.
+- **Loss:** $-\sum_t \log \pi(a_t \mid s_t)\, G_t \;-\; 0.01 \sum_t \mathcal{H}[\pi(\cdot \mid s_t)]$, with Adam (learning rate 0.001). The returns are not normalised and no baseline is subtracted.
+- **Training:** 2,000 episodes. Gradients are accumulated over 5 episodes per optimizer step and clipped to norm 1.
+- **Evaluation:** 500 episodes with actions sampled from the policy, as during training. Episode $i$ starts from seed $i$.
+
+### Deviations from the Plain Algorithm and Why
+
+None of these is a baseline: the learning signal is still the raw discounted return of each action.
+
+| Change | Reason |
+|---|---|
+| Return restarts after every point | $G_t$ only contains the point of the current rally: $G_t = \gamma^{k} r_{t+k}$, where $t + k$ is the next step with a reward. With the plain discounted sum, an action would also be credited with later rallies it has no influence on. |
+| Learning rate 0.001 instead of 0.01 | See the development runs below. |
+| 5 episodes per update | Averages the very noisy gradient of single episodes. |
+| Entropy bonus (0.01) | Keeps the policy from saturating at one action, after which the gradient vanishes. |
+| Gradient clipping (norm 1) | The norm before clipping is between ~3 and ~800, so clipping is active in every update (see the diagnostics). It keeps the direction and rescales every update to norm 1, so every batch counts equally. Adam is insensitive to the overall scale of the gradients anyway, so the growing norm does not change the step size. |
+| `Bernoulli(logits=...)` instead of `probs=sigmoid(...)` | Exact log-probabilities when the policy saturates (edge cases). |
+
+**Development runs** (short runs before the final one; not part of the notebook):
+
+| Setting | Episodes | Result |
+|---|---|---|
+| Single frame as input, lr 0.01, update every episode | 500 | Reward stays at about −21 |
+| Frame difference, lr 0.001, update every episode | 500 | Reward stays at about −21 |
+| + lr 0.0001, 10 episodes per update, entropy bonus, clipping | 500 | $P(\text{down})$ stays at 0.49–0.51: the policy barely changes |
+| lr 0.001, 5 episodes per update (final settings) | 300 | Std of $P(\text{down})$ within an episode rises from 0.001 to 0.013: the policy starts to react to the screen |
+
+### Training
+
+![Training curve](figures/3b_training.png)
+
+- **Learning starts late but then continues.** The moving average stays at about −20.5 for the first ~700 episodes and then rises steadily to **−18.1 over the last 100 episodes** (first 100: −20.6).
+- **It has not converged.** The largest gain comes in the last 500 episodes, so the 2,000-episode budget, not convergence, limits the result.
+
+![Training diagnostics](figures/3b_training_diagnostics.png)
+
+The diagnostics show *how* learning happens, before it is visible in the reward:
+- **Std of $P(\text{down})$ within an episode:** below 0.01 for the first ~700 episodes, i.e. the policy outputs the same probability whatever the screen shows. It then rises to 0.23. The policy only starts to depend on the state from episode ~750, which is exactly when reward and episode length start to rise.
+- **Mean $P(\text{down})$** stays between 0.4 and 0.6, so the policy never collapses to a single action. The initial bias of the random network (0.58) is removed within ~100 episodes.
+- **Episode length** doubles from ~1,000 to ~2,100 steps: the agent returns the ball more often, so rallies last longer.
+- **Gradient norm** grows from ~35 to ~235 (median of the first and last 50 updates). The loss is a sum over all steps of 5 episodes, so longer episodes add more terms, which explains at most a factor of ~2. The rest is probably because the policy now reacts consistently: early on, the steps push in random directions and mostly cancel; later, many steps push the same weights in the same direction. This does not affect training, since clipping and Adam make the step size independent of the gradient norm.
+
+### Evaluation
+
+![Evaluation histogram](figures/3b_histogram.png)
+
+**Mean = −17.66, std = 1.86** over 500 episodes. 95% of the episodes score better than the random policy (−20.4), and the best episode reaches −10. The policy wins about 3 points per game, but still loses every game.
+
+### Edge Cases
+
+| Edge case | Handling |
+|---|---|
+| Sparse rewards | Only every ~95 steps (median rally of the trained policy) is a reward ≠ 0. The return restart keeps every return in $[-1, 1]$ and assigns each point only to its rally (Check 1). |
+| No motion in a single frame | The frame difference shows direction and speed. In the first step of an episode it is all 0 (tested). |
+| Restricted action space | Only actions 2 and 3; there is no "stay" action, so the paddle is always moving. |
+| `preprocess` modifies its input | The given function writes into a view of the observation. I copy the frame first, so the observation of the environment stays unchanged (tested). |
+| Saturated policy | `Bernoulli(probs=sigmoid(50))` gives $\log P(\text{up}) = -15.9$ because PyTorch clamps the probability; the exact value is −50. `logits=` is exact (tested). The entropy bonus keeps the policy away from saturation. |
+| End of an episode | Pong-v5 has no relevant step limit (108,000 frames). Every one of 800 evaluation episodes ends by termination when one side has 21 points (tested). |
+| Sticky actions | Pong-v5 repeats the previous action with probability 0.25, so games are random even for a fixed policy. Seeding the first `env.reset` and `torch.manual_seed` makes training reproducible: training twice gives identical results (tested). |
+| Invalid arguments | `episodes <= 0`, $\gamma \notin (0, 1]$ and `batch_episodes <= 0` raise a `ValueError` (tested). |
+| Long training | Checkpoints and log are saved every 250 episodes, so a crash loses at most 250 episodes. |
+
+### Tests for Validating Correctness
+
+The tests are in the **Checks** section of `3b_Pong-v5.ipynb` and reuse the trained policy and its checkpoints. Each test prints `[PASS]` / `[FAIL]`. **All pass except two**, which test a behaviour the policy has not learned (Checks 4 and 5, explained there).
+
+**1. Returns and credit assignment.** A single final reward gives $G_t = \gamma^{T-1-t}$, and with two rallies `[0, 0, −1, 0, 0, +1]`, the first rally only sees its own point: $[-\gamma^2, -\gamma, -1, \gamma^2, \gamma, 1]$ ✓. In a real 2,837-step episode, $|G_t| \le 1$ at every step ✓.
+
+![Returns in an evaluation episode](figures/3b_returns.png)
+
+With a median rally of 95 steps, $\gamma^{95} = 0.38$: the first action of a rally still gets 38% of the credit for its point.
+
+**2. Preprocessing, frame difference and actions.** The preprocessed frame only contains 0/1 and the difference only −1/0/+1 ✓. Action 2 moves the paddle to the top ($y = 2$ of 158), action 3 to the bottom ($y = 156$) ✓.
+
+![Preprocessing and frame difference](figures/3b_preprocessing.png)
+
+In the difference, the background disappears, and the ball and both paddles appear as +1/−1 pairs. The player's paddle is only visible while it moves.
+
+**3. Comparison with reference policies** (50 episodes each, same start states):
+
+![Reference policies vs. the trained policy](figures/3b_reference_policies.png)
+
+| Policy | Reward | Length (steps) | Points won |
+|---|---|---|---|
+| Always up / always down | −21.00 ± 0.00 | 764 | 0 |
+| Random | −20.40 ± 0.75 | 1,024 | 0.6 |
+| Ball tracker (hand-coded) | −14.74 ± 2.16 | 3,876 | 6.3 |
+| **Trained, sampled** (first 50 evaluation episodes) | **−18.02 ± 1.83** | 2,217 | 3.0 |
+| Trained, greedy | −15.68 ± 2.37 | 2,960 | 5.3 |
+
+- The *ball tracker* is not trained. It always moves the paddle towards the ball, using the ball and paddle positions read from the pixels. It shows what the two actions can achieve and serves as a reference.
+- **The trained policy is clearly better than random** ✓ and closes a bit less than half of the gap between random and the ball tracker.
+- **Even the ball tracker loses**, because returning the ball is not enough: a point is only won when the opponent misses, which requires steep shots off the edge of the paddle.
+- **The greedy policy is better than the sampled one** (−15.68 vs. −18.02). I chose sampled actions for the main evaluation before training, because a policy that is still close to 0.5 everywhere can turn into "always the same action" when acted on greedily. After training, the policy is decisive enough that removing the sampling noise helps.
+
+**4. Does the policy react to the ball?** For every checkpoint (8 episodes each), I compare $P(\text{down})$ in two pairs of situations:
+- **Direction gap:** ball moving down vs. ball moving up. The frame difference shows this directly.
+- **Position gap:** ball below vs. above the paddle (by more than 10 pixels), only while the ball approaches the player.
+
+Both gaps are 0 for a policy that ignores the ball. I use gaps instead of correlations, because while $P(\text{down})$ barely varies, a correlation only measures noise.
+
+![Policy response to the ball](figures/3b_policy_response.png)
+
+| Checkpoint | 0 | 500 | 750 | 1,000 | 1,500 | 2,000 |
+|---|---|---|---|---|---|---|
+| Direction gap | 0.000 | +0.003 | +0.026 | +0.095 | +0.089 | **+0.085** |
+| Position gap | 0.000 | +0.001 | +0.015 | −0.027 | −0.073 | **−0.057** |
+
+- **Initial policy ignores the ball** (both gaps 0) ✓.
+- **The policy learns to move with the ball's vertical direction** ✓. The direction gap appears at episode 750, exactly when the std of $P(\text{down})$ and the reward start to rise.
+- **[FAIL] It does not learn to move towards the ball's position.** The position gap never becomes clearly positive and is even negative at the end. This is a property of the learned policy, not a bug in the check: the check is 0 for the untrained policy and works with the same position data that make the ball tracker succeed. The likely reason is the input: the ball's direction is directly visible in the frame difference, but the paddle only appears in it while it moves, so "ball above or below the paddle" is much harder to learn. Following the ball's direction keeps the paddle roughly in line with the ball, which explains the longer rallies. It also explains why the policy stays far below the ball tracker.
+
+**5. First 10 steps.** The 10 steps before the first point of evaluation episode 0:
+
+| $t$ | 54 | 55 | 56 | 57 | 58 | 59 | 60 | 61 | 62 | 63 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Ball − paddle (px) | −79 | −53 | −43 | −32 | −26 | −36 | −50 | −44 | −20 | −10 |
+| $P(\text{down})$ | 0.24 | 0.21 | 0.32 | 0.56 | 0.62 | 0.62 | 0.67 | 0.69 | 0.60 | 0.75 |
+| Action | up | down | up | down | down | down | up | up | down | down |
+| Reward | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | −1 |
+
+- **[FAIL] The more likely action points towards the ball in only 3 of 10 steps.** The ball is above the paddle the whole time but moving down (its $y$ rises from 50 to 121). $P(\text{down})$ rises with it, from 0.24 to 0.75, so the policy follows the ball's motion, not its position: the same behaviour as in Check 4.
+- The paddle therefore moves down with the ball instead of waiting for it, and the point is lost.
+
+### Summary of 3b
+
+| | Value |
+|---|---|
+| Training reward, first / last 100 episodes | −20.57 / −18.07 |
+| Episode length, first / last 100 episodes | 993 / 2,065 steps |
+| Evaluation (500 episodes, sampled) | **−17.66 ± 1.86** |
+| Reference: random / ball tracker | −20.40 / −14.74 |
+| Learned behaviour | Moves with the ball's vertical direction, not towards its position |
+
+REINFORCE without a baseline learns Pong, but slowly: for the first ~700 of 2,000 episodes the policy does not react to the screen at all. It then learns the feature that is easiest to see in the frame difference, the ball's direction, and doubles the rally length. It still loses every game and was still improving when training ended.
