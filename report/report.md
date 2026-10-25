@@ -674,3 +674,294 @@ Both gaps are 0 for a policy that ignores the ball. I use gaps instead of correl
 | Learned behaviour | Moves with the ball's vertical direction, not towards its position |
 
 REINFORCE without a baseline learns Pong, but slowly: for the first ~700 of 2,000 episodes the policy does not react to the screen at all. It then learns the feature that is easiest to see in the frame difference, the ball's direction, and doubles the rally length. It still loses every game and was still improving when training ended.
+
+# 3 Policy Gradient: Part 2
+
+## 3a) CartPole-v1 With a Baseline
+
+**Notebook:** `3a_CartPole-v1.ipynb`, section **Part 2**. All figures are saved to `report/figures/3a_baseline_*.png`. Training takes about 30 min, the checks about 3 min. Part 2 only needs the definition cells of Part 1, not its trainings.
+
+**Setup:** I take the best configuration from Part 1 ($\gamma = 0.995$, cosine scheduler 0.01 → 0.001, reward shaping) and change only one thing: whether a baseline is subtracted from the returns. The baseline averages over several episodes, so **both** variants update the policy on batches of $N = 5$ episodes (200 updates for 1,000 episodes). Without a baseline, this is the Part 1 algorithm with batches. The scheduler is stepped once per update, i.e. `T_max` = 200. Evaluation is as in Part 1: 500 greedy episodes on the same start states.
+
+### Chosen Baseline and Implementation
+
+**Non-constant baseline: the average return at the same step of the other episodes of the batch.** For episode $i$ at step $t$:
+
+$$b_t^{(i)} = \frac{1}{N-1} \sum_{j \neq i} G_t^{(j)}, \qquad G_t^{(j)} = 0 \text{ if episode } j \text{ has already ended at step } t,$$
+
+and the loss becomes $-\frac{1}{N} \sum_i \sum_t \log \pi(a_t^{(i)} \mid s_t^{(i)})\,\big(G_t^{(i)} - b_t^{(i)}\big)$.
+
+| Design choice | Reason |
+|---|---|
+| Per step instead of one constant | With $\gamma = 0.995$, the return falls steadily over an episode (Part 1, Test 1). One constant would be too small at the start and too large at the end of every episode. Comparing step $t$ with step $t$ of the other episodes removes this trend, so the advantage measures how much better than the others the episode is doing *from this point on*. |
+| Leave-one-out ($j \neq i$) | The baseline must not depend on the episode's own actions; otherwise the gradient is biased. Averaging only over the *other* episodes guarantees this. |
+| $G_t^{(j)} = 0$ after the end | An episode that has already failed collects no more reward. An episode that survives longer than the others therefore gets a positive advantage for its late steps. |
+| A full batch of identical episodes gives no update | If all episodes reach the 500-step limit with the same rewards, all advantages are 0. With a constant baseline instead, the return shrinking towards the time limit would make the last steps of a successful episode look worse than average, and their (good) actions would be pushed down. |
+
+**Implementation** (`compute_advantages`): the returns of the batch are padded with zeros into an $N \times T_{\max}$ matrix. The leave-one-out mean at every step is $(\text{column sum} - \text{own row}) / (N-1)$; it is subtracted from each episode's returns and cut back to the episode's length. The function also supports a constant baseline (mean return over all steps of the batch), which is only used for comparison in Test 8.
+
+### Training and Evaluation (Seed 0)
+
+![Training with and without baseline](figures/3a_baseline_training.png)
+
+- **Without baseline:** the moving average reaches 475 at episode 576 and stays at ~480 until episode 830. It then drops to ~455 for about 100 episodes and ends at 477.
+- **With baseline:** it reaches 475 a bit later (episode 678), then 500 from episode ~720 to ~800. It only dips briefly to ~473 and ends at ~495. Late failures (the downward spikes) are rarer.
+
+![Evaluation histograms with and without baseline](figures/3a_baseline_histogram.png)
+
+**Evaluation:** both policies reach the limit in all 500 episodes: **mean = 500.0, std = 0.0** for both. As in Part 1, the greedy evaluation of a single seed cannot separate the variants, so the comparison relies on the 5 seeds.
+
+### Comparison Over 5 Seeds
+
+![Mean training curve over 5 seeds, with and without baseline](figures/3a_baseline_seeds.png)
+
+| Variant | Solved at (seeds 0–4) | Mean training reward | Mean of last 100 | Greedy evaluation (500 episodes) | Sampled evaluation (100 episodes) |
+|---|---|---|---|---|---|
+| Without baseline | 576, –, –, 745, 893 | 240.1 ± 52.6 | 462.1 ± 25.2 | 500.0 (exactly 500 for 4/5 seeds) | 462.3 |
+| **With baseline** | 678, 831, 801, 701, 715 | **281.7 ± 27.7** | **484.0 ± 10.5** | **500.0 (5/5 seeds)** | **488.9** |
+
+(– = not solved within 1,000 episodes; ± = std over the 5 seeds)
+
+- **The baseline helps consistently.** Without it, 2 of 5 seeds never reach the solved threshold; with it, all 5 do. The mean training reward is 17% higher and the last 100 episodes are 22 points better.
+- **The seeds agree much more:** the std over seeds halves (52.6 → 27.7 over training, 25.2 → 10.5 at the end), and the min–max band is much narrower. This is the effect a lower-variance gradient should have: training depends less on which episodes happen to be sampled.
+- **The final policies are more robust:** with sampled actions, they reach 488.9 instead of 462.3.
+- **Batching alone costs speed.** The best Part 1 run (one update per episode, 1,000 updates) reached 475 at episodes 327–659 for all 5 seeds. With batches of 5, there are only 200 updates. The baseline recovers the reliability (5/5 solved, last 100 = 484.0 vs. 494.6 in Part 1), but not the speed. Within the fair comparison (both batched), the baseline is clearly better.
+
+### Edge Cases
+
+The edge cases of Part 1 (time limit, reward shaping, invalid $\gamma$, reproducibility) apply unchanged.
+
+| Edge case | Handling |
+|---|---|
+| Episodes of different lengths | The returns are padded with 0 after an episode ends (Test 7), which is the true return after the end. |
+| Batch of identical episodes | All advantages are exactly 0, so no update. This matters most at the time limit, when all episodes are truncated at 500 (Test 7). |
+| Only one episode per batch | Leave-one-out has no other episode to average over, so `batch_size = 1` with the per-step baseline raises a `ValueError` (tested). |
+| Batch size does not divide the episodes | Would silently drop the remaining episodes, so it raises a `ValueError` (tested). An unknown baseline name is rejected as well. |
+| Scheduler with batches | Stepped once per update, so `T_max = episodes // batch_size`; the learning rate ends exactly at 0.001 (tested). With `T_max = episodes`, it would only reach 0.0091. |
+| Baseline must not bias the gradient | Leave-one-out: the baseline of an episode does not depend on that episode (Test 7). |
+| Fair comparison | Same configuration, batch size, seeds and evaluation start states; only the baseline differs. |
+
+### Tests for Validating Correctness
+
+The tests are in the **Part 2 Checks** section of the notebook and continue the numbering of Part 1. Each test prints `[PASS]` / `[FAIL]`, and all of them pass.
+
+**7. Advantages on hand-made batches.** `compute_advantages` gives the expected result on batches with known answers ($\gamma = 0.995$, reward 1 per step):
+- 5 identical episodes of 500 steps: every per-step advantage is exactly 0 ✓.
+- **Leave-one-out:** replacing episode 0 by a longer one does not change its own baseline ✓.
+- After all other episodes have ended, the advantage of the longest episode equals its return ✓.
+- The constant baseline's advantages sum to 0 ✓; without a baseline, the advantages are the returns ✓.
+
+Advantages for a batch with episode lengths 30, 80, 120, 200 and 60:
+
+| Episode (length) | $t = 0$ | $t = 29$ | $t = 59$ | $t = 119$ | $t = 199$ |
+|---|---|---|---|---|---|
+| 0 (30) | −55.8 | −64.6 | – | – | – |
+| 1 (80) | −8.2 | −9.4 | −18.8 | – | – |
+| 2 (120) | 22.3 | 25.7 | 22.1 | −15.7 | – |
+| 3 (200) | 67.5 | 78.1 | 82.9 | 66.5 | 1.0 |
+| 4 (60) | −25.8 | −29.8 | −42.5 | – | – |
+
+Episodes that fail earlier than the others get negative advantages, and the longest episode gets positive ones. Without a baseline, every step of every episode would get a positive weight. Episode 2 turns negative near its end: its own remaining return goes towards 0, while episode 3 is still running and has a large return ahead.
+
+**8. Variance of the gradient estimate.** A baseline should lower the variance of the gradient estimate without changing its expected value. I measure this directly: for a **fixed** policy, I sample 50 batches of 5 episodes. On the same episodes, I compute each batch's gradient three times: without baseline, with a constant baseline (batch mean), and with the per-step baseline. The total variance is $\frac{1}{M}\sum_m \lVert g_m - \bar g \rVert^2$.
+
+![Gradient variance with and without baseline](figures/3a_baseline_gradient_variance.png)
+
+| Policy | Baseline | Total variance | Relative to no baseline | Cosine of mean gradient with no baseline |
+|---|---|---|---|---|
+| Untrained | None | 138 | 1.000 | 1.000 |
+| | Constant | 112 | 0.807 | 0.993 |
+| | Per step | 132 | 0.953 | 0.988 |
+| Trained (without baseline, seed 0) | None | $9.0 \cdot 10^5$ | 1.000 | 1.000 |
+| | Constant | $1.3 \cdot 10^5$ | 0.148 | −0.511 |
+| | Per step | $3.9 \cdot 10^4$ | **0.043** | −0.256 |
+
+- **For the trained policy, the per-step baseline reduces the variance by a factor of 23** (the constant baseline by 7) ✓. Its episodes are long and all returns are large and positive (up to ~114 with shaped rewards). Without a baseline, every action is pushed up with a large weight, and the gradient mainly reflects which actions happened to be sampled. The baseline removes this common part. The per-step version also removes the decline of the return within an episode, which the constant one cannot.
+- **For the untrained policy, the reduction is small** (factor 0.95) ✓. All episodes are short (~20 steps) with similar returns, so there is little common part to remove.
+- **Same direction:** for the untrained policy, the mean gradients with and without baseline point in the same direction (cosine 0.99) ✓, as expected for an unbiased baseline. For the trained policy, the cosine is negative. With a variance of $9 \cdot 10^5$, the mean of 50 batches without baseline still has a standard error of about $\sqrt{9 \cdot 10^5 / 50} \approx 134$ in norm. Near the optimum, the true gradient is small, so 50 batches cannot estimate its direction: this cosine is dominated by noise and not informative.
+
+This is the mechanism behind the training results: the seeds without a baseline differ much more, because their gradient steps depend much more on chance.
+
+### Summary of 3a, Part 2
+
+| | Without baseline | With baseline (per step, leave-one-out) |
+|---|---|---|
+| Solved (5 seeds) | 3/5 | **5/5** |
+| Mean of last 100 episodes (5 seeds) | 462.1 ± 25.2 | **484.0 ± 10.5** |
+| Sampled evaluation (5 seeds) | 462.3 | **488.9** |
+| Greedy evaluation, seed 0 | 500.0 ± 0.0 | 500.0 ± 0.0 |
+| Gradient variance, trained policy | 1 | **0.043** |
+
+The per-step baseline lowers the gradient variance by more than an order of magnitude once episodes get long. As a result, training is more reliable and consistent across seeds, and the final policies are more robust.
+
+---
+
+## 3b) Pong-v5 With a Baseline
+
+**Notebook:** `3b_Pong-v5.ipynb`, section **Part 2**. All figures are saved to `report/figures/3b_baseline_*.png`. Training takes about 2 h 45 min, evaluation and checks about 80 min. The run is saved to `checkpoints/3b/actor_critic/`, and all evaluations and checks are cached there, so with `RETRAIN = False` and `RECOMPUTE = False` Part 2 runs again in seconds. It only needs the definition cells of Part 1.
+
+**Setup:** everything is identical to Part 1: network, frame difference, $\gamma = 0.99$, return restart after every point, learning rate 0.001, 5 episodes per update, entropy bonus, clipping, 2,000 episodes and seed 0. The only change is the weight of the log-probabilities in the actor's loss. Pong training is too slow for several seeds, so the comparison is **one run per variant** (see the limitations at the end).
+
+### Chosen Baseline and Implementation
+
+**Non-constant baseline: a learned state value $V(s_t)$ (actor-critic).** The actor is weighted with the advantage
+
+$$A_t = G_t - V(s_t),$$
+
+where $V$ is a second network, the *critic*, which learns to predict the return of the current rally.
+
+| Design choice | Reason |
+|---|---|
+| Critic: same layers as the policy, own Adam optimizer (lr 0.001, clipped to norm 1) | Trained on the same Monte-Carlo returns with the loss $\frac{1}{T}\sum_t (V(s_t) - G_t)^2$, updated together with the actor every 5 episodes. |
+| Monte-Carlo return $G_t$, not a bootstrapped TD target | $V(s_t)$ does not depend on the action $a_t$, so $\mathbb{E}[\nabla \log \pi(a_t \mid s_t)\, V(s_t)] = 0$: the expected gradient is the same as in Part 1, only its variance changes. A TD target would also reduce the variance, but bias the gradient. |
+| Critic input: current frame **and** frame difference (2×80×80) | The value of a state depends on where the paddle is relative to the ball, which the frame difference alone mostly hides (Part 1, Check 4). Any input that does not depend on $a_t$ keeps the baseline unbiased. |
+| $V$ is detached in the advantage | The actor's loss does not train the critic, and the critic's loss does not change the actor. |
+| State-dependent instead of constant | Returns vary strongly within an episode: close to −1 just before a lost point, close to +1 before a won one. A constant cannot follow this; $V(s_t)$ can. |
+
+**Implementation** (`train_actor_critic`): `sample_episode` plays an episode exactly as in Part 1 and also stores the critic's inputs as `int8`. After the episode, `critic_values` computes $V(s_t)$ for all steps in chunks of 256 steps and accumulates the critic's gradient. The actor's loss is then $-\sum_t \log \pi(a_t \mid s_t)\,(G_t - V(s_t)) - 0.01 \sum_t \mathcal{H}_t$. Every 5 episodes, both networks are clipped and updated.
+
+### Training and Evaluation
+
+![Training with and without baseline](figures/3b_baseline_training.png)
+
+![Moving averages with and without baseline](figures/3b_baseline_comparison.png)
+
+- **Learning starts much earlier.** With the baseline, the policy starts reacting to the screen (std of $P(\text{down})$) at episode ~250 instead of ~750, and the reward rises from the start. The moving average reaches −19.5 at episode **990 instead of 1,530**.
+- **It learns faster for the whole run.** The last 100 episodes reach **−14.93 instead of −18.07**, and the rallies are 50% longer (3,028 vs. 2,065 steps).
+- **Still improving at the end,** even more steeply than without baseline.
+
+![Evaluation histograms with and without baseline](figures/3b_baseline_histogram.png)
+
+| | Without baseline | With baseline (actor-critic) |
+|---|---|---|
+| Mean training reward | −19.83 | **−18.74** |
+| Reward, last 100 training episodes | −18.07 | **−14.93** |
+| Moving average reaches −19.5 at episode | 1,530 | **990** |
+| **Evaluation, sampled (500 episodes)** | **−17.66 ± 1.86** | **−13.27 ± 2.87** |
+| Evaluation, greedy (50 episodes) | −15.68 ± 2.37 | **−10.22 ± 3.33** |
+| Greedy: points won per game / length | 5.3 / 2,960 | **10.8 / 3,847** |
+| *Reference:* random / ball tracker (Part 1, Check 3) | −20.40 / −14.74 | |
+
+- **The evaluation improves by 4.4 points.** Every one of the 500 episodes is better than the random policy, and the best one reaches −1. The policy still loses every game.
+- **It now beats the hand-coded ball tracker** (−13.27 sampled, −10.22 greedy, vs. −14.74). Without the baseline, it stayed clearly below it.
+- **The larger std (2.87 vs. 1.86)** mostly reflects the wider range of results: a better player has more room between losing 21:0 and winning many points.
+
+### What the Critic Learns
+
+![Critic during training](figures/3b_baseline_critic.png)
+
+- **First, the critic learns the average return.** Its loss drops from 0.8 to ~0.12 within ~150 episodes. Most returns are negative (the agent loses most points), and subtracting this average alone shrinks the actor's weights from a mean $|G_t|$ of ~0.78 to a mean $|A_t|$ of ~0.22 within the first 200 episodes.
+- **Then it learns to tell states apart.** The explained variance $1 - \mathrm{Var}(G - V)/\mathrm{Var}(G)$ stays below 0.05 for the first 1,000 episodes and rises to **0.26** over the last 100. The critic increasingly predicts *which* rallies will be won.
+- **The critic's loss rises slowly again** (0.12 → 0.21). As the agent wins more points, the returns spread over the whole range from −1 to +1 and become harder to predict.
+
+![Policy response with and without baseline](figures/3b_baseline_policy_response.png)
+
+| Checkpoint | 250 | 500 | 1,000 | 1,500 | 2,000 |
+|---|---|---|---|---|---|
+| Direction gap, without / with baseline | 0.000 / **+0.015** | +0.003 / **+0.095** | +0.095 / +0.064 | +0.089 / +0.057 | +0.085 / +0.060 |
+| Position gap, without / with baseline | 0.000 / +0.006 | +0.001 / −0.008 | −0.027 / −0.009 | −0.073 / +0.001 | −0.057 / **+0.044** |
+
+- **The direction gap appears about 500 episodes earlier** (+0.095 at episode 500, a level Part 1 only reaches at episode 1,000). It is the same feature as in Part 1, learned faster.
+- **The position gap becomes positive at the end** (+0.044 at episode 2,000, vs. −0.057 without baseline). This is a first sign that the policy also starts moving *towards* the ball, but it is below the threshold of 0.05 used in Part 1 and based on 8 episodes, so it is only a hint.
+
+### Edge Cases
+
+The edge cases of Part 1 (sparse rewards, frame difference, saturation, end of an episode, sticky actions) apply unchanged.
+
+| Edge case | Handling |
+|---|---|
+| Biased baseline | A baseline must not depend on the action $a_t$. The critic only sees the frames *before* $a_t$, and its value is detached in the advantage (tested). The Monte-Carlo target keeps the gradient unbiased. |
+| Untrained critic at the start | The untrained critic predicts ~+0.09, while the returns average ~−0.76. For the first ~100 episodes it is therefore a bad baseline: the mean $|A_t|$ is even slightly larger than $|G_t|$, and the gradient variance is 1.2× that without baseline (Check 8). It learns the average within ~150 episodes. I did not pre-train the critic, so both runs start identically. |
+| Critic lags behind the improving policy | The critic is trained on returns of earlier, worse policies, so it is too pessimistic (mean $V$ −0.44 vs. mean $G$ −0.25, Check 7). This does not bias the gradient; it only makes the variance reduction smaller than with a perfect critic. |
+| Unbounded critic output | $G_t \in [-1, 1]$, but the critic's output is not bounded. 1% of its predictions lie outside $[-1, 1]$ (lowest −1.41). As a baseline this is harmless, so I did not add a `tanh`. |
+| Long episodes (up to ~4,000 steps) | The critic's forward/backward pass runs in chunks of 256 steps, and its inputs are stored as `int8` (12.8 KB per step). The chunked pass gives exactly the same values, loss and gradients as one pass (tested). |
+| Fair comparison | Same seed and same initial actor weights. The critic is initialised with `torch.random.fork_rng`, so it does not shift the random numbers used for sampling: the first 5 episodes (before the first update) are identical to Part 1 (tested). |
+| Wrong optimizer | A critic optimizer that does not optimise exactly the critic's parameters would silently leave the critic untrained. It raises a `ValueError` (tested), as do the invalid inputs of Part 1. |
+| Reproducibility | Training twice with the same seed gives identical results, including the critic's loss (tested). |
+
+### Tests for Validating Correctness
+
+The tests are in the **Part 2 Checks** section of `3b_Pong-v5.ipynb` and run after the training; Checks 7 and 8 are cached. Each test prints `[PASS]` / `[FAIL]`, and **all of them pass**.
+
+**6. Fair setup and advantage computation.**
+- The actor starts from exactly the same weights as in Part 1, and the first 5 episodes are identical (rewards −20, −21, −21, −21, −21) ✓. Every later difference is caused by the baseline.
+- The values in the advantage carry no gradient ✓.
+- The chunked critic pass equals a single pass (values, loss and gradients) ✓.
+- The explained variance is 1 for $V = G$ and 0 for $V = \bar G$ ✓.
+
+**7. Does the critic predict the return?** 10 episodes of the final actor, evaluated with the untrained and the final critic on the same steps:
+
+![Critic predictions and calibration](figures/3b_baseline_values.png)
+
+| | Untrained critic | Final critic |
+|---|---|---|
+| Explained variance | 0.000 | **0.325** ✓ |
+| Mean $V$ over the 20 steps before a **won** point (91 points) | | **+0.10** |
+| Mean $V$ over the 20 steps before a **lost** point (210 points) | | **−0.61** ✓ |
+
+- The final critic clearly separates rallies that will be won from those that will be lost, and in the test episode its value rises before every won point.
+- **Calibration:** the actual return increases monotonically with the predicted value (all 10 deciles), but lies 0.2–0.4 above it. The critic is too pessimistic, because it lags behind the improving policy (edge cases).
+
+**8. Variance of the gradient estimate.** As in CartPole: for a fixed actor and critic, 20 batches of 5 episodes, with the gradient of every batch computed on the same episodes without baseline, with a constant baseline (the batch's mean return) and with the critic. The entropy term is left out.
+
+![Gradient variance with and without baseline](figures/3b_baseline_gradient_variance.png)
+
+| Checkpoint | Baseline | Total variance | Relative to no baseline | Cosine of mean gradient with no baseline |
+|---|---|---|---|---|
+| After 0 episodes | None | $3.5 \cdot 10^3$ | 1.00 | 1.00 |
+| | Constant (batch mean) | $5.3 \cdot 10^2$ | 0.15 | 0.70 |
+| | Critic (untrained) | $4.2 \cdot 10^3$ | 1.20 | 1.00 |
+| After 2,000 episodes | None | $4.7 \cdot 10^5$ | 1.00 | 1.00 |
+| | Constant (batch mean) | $2.5 \cdot 10^5$ | 0.52 | 0.99 |
+| | **Critic (trained)** | $\mathbf{1.4 \cdot 10^5}$ | **0.29** ✓ | 0.96 |
+
+- **The trained critic reduces the variance by a factor of 3.5**, clearly more than the constant baseline (factor 1.9) ✓. Once the agent wins points, a constant cannot follow the returns, which now vary between rallies.
+- **At the start, the constant baseline is better and the untrained critic slightly harmful.** Almost all returns are negative, so their mean removes most of the noise; the untrained critic subtracts the wrong constant (+0.09). This is the same effect as in the edge cases. During training, the critic learns this mean within the first ~150 episodes.
+- **Same direction:** the mean gradients with the baselines point in the same direction as without (cosine 0.96–1.00), as expected for unbiased baselines. With 20 batches this is only a rough check; the 0.70 of the constant baseline at the start comes from the noise of the untrained policy's small gradient.
+- The variance grows ~130× over training, because episodes are ~3× longer and the policy's gradients larger (Part 1, training diagnostics).
+
+### Summary of 3b, Part 2
+
+| | Without baseline | With baseline (actor-critic) |
+|---|---|---|
+| Policy starts reacting to the screen | episode ~750 | **episode ~250** |
+| Moving average reaches −19.5 | episode 1,530 | **episode 990** |
+| Reward, last 100 training episodes | −18.07 | **−14.93** |
+| Evaluation, sampled (500 episodes) | −17.66 ± 1.86 | **−13.27 ± 2.87** |
+| Evaluation, greedy (50 episodes) | −15.68 ± 2.37 | **−10.22 ± 3.33** |
+| Gradient variance, final policy | 1 | **0.29** |
+
+The learned baseline makes REINFORCE on Pong learn much faster: the policy starts reacting to the ball about 500 episodes earlier, and after the same 2,000 episodes it wins about twice as many points and beats the hand-coded ball tracker. The critic learns first the average return and later which rallies will be won, and in the end reduces the gradient variance by a factor of 3.5. **Limitation:** this is a single run per variant. The difference is large and consistent over the whole run, but without several seeds I cannot quantify how much of it depends on the seed.
+
+---
+
+# 3.3 Question: "Given an Additional 3 Months, What Other Validation Tests and Experiments Would You Perform?"
+
+**The algorithms look correct.** In both games, the agent learns, all checks of the implementation pass, the baselines reduce the gradient variance as predicted, and both Pong runs were still improving when training stopped. The main limitation is training time, especially for Pong, so most of the 3 months would go into longer and repeated runs, and into finding out which changes make learning faster.
+
+### CartPole (3a)
+
+- **Remove the time limit.** The greedy evaluation is saturated at 500 steps, and Test 6 showed that the γ = 0.995 policy drifts towards the edge of the track and would probably fail in a longer episode. Evaluating with 5,000 or more steps would reveal such slow failures.
+- **Robustness to disturbances:** random pushes on the cart, noise on the observations, and different pole lengths or masses. This tests whether the policy really balances or just memorised the start states.
+- **Energy:** measure how much the cart moves (direction changes, distance travelled) and penalise wasted movement in the reward. A good policy should balance with as little movement as possible, and this would show whether the learned policies push back and forth unnecessarily.
+- **More seeds (e.g. 20)** for all variants, to get reliable confidence intervals for the differences in Parts 1 and 2.
+- **A learned critic for CartPole** as well, to compare it with the leave-one-out baseline on the same task.
+
+### Pong (3b)
+
+- **Train much longer.** Both runs were still improving after 2,000 episodes, and the actor-critic run was improving even faster at the end. Training for 10,000–20,000 episodes would show how good the agent gets, and whether it eventually wins games against the built-in opponent (reward > 0). Since the algorithm learns and all checks pass, this mainly needs time.
+- **Several seeds for both variants.** At ~2.5 h per run, 5 seeds per variant are feasible and would confirm that the baseline's advantage is not a lucky seed.
+- **Network architecture.** The current CNN has only 8 channels and two max-pooling layers, so the final feature map is only 18×18 for a ball of 1×2 pixels. This low resolution and the frame difference (which hides the paddle when it does not move) probably explain why the policy follows the ball's direction rather than its position (Check 4). I would compare:
+  - two stacked frames instead of the difference (as the critic already uses), so the actor sees the paddle's position;
+  - more channels, strided convolutions instead of pooling, or the full 160×160 resolution;
+  - a small MLP on hand-extracted features (ball and paddle positions and velocities), as an upper bound on what the representation allows.
+- **Energy and actions:** add the `NOOP` action, measure how much the paddle moves, and penalise wasted movement. Currently the paddle can never stand still, which makes it jitter around the ball.
+- **Hyperparameters:** learning rate, batch size, entropy coefficient, γ, and normalised advantages, each compared on learning speed.
+- **Better validation of the critic:** the ALE can save and restore the game state. From saved states, many rollouts give the true value $V^\pi(s)$, which the critic's predictions can be compared with directly. With more batches, the unbiasedness test of Check 8 could also be made precise.
+- **Harder evaluation:** other game modes and difficulties of the opponent, and without sticky actions.
+
+### More Advanced Methods (both games)
+
+- **Better policy-gradient methods:** A2C with a TD(λ) / GAE critic and parallel environments, and **PPO**, which reuses each batch for several clipped updates and is much more sample-efficient.
+- **Value-based and model-based methods:** DQN as the classic Atari baseline, and world-model methods such as **Dreamer**, which learn a model of the game and train the policy in imagination.
+- **Benchmark:** compare all variants (REINFORCE, the baselines, the architectures, A2C, PPO, DQN, Dreamer) on the same budget and several seeds, measuring the episodes, environment steps and wall-clock time needed to reach fixed rewards (e.g. −15, 0, +15 in Pong). This would show which modification learns fastest and is worth its extra complexity.
