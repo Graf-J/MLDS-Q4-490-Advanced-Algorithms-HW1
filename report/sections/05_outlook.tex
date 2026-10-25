@@ -1,0 +1,42 @@
+\section{Given an Additional 3 Months, What Other Validation Tests and Experiments Would I Perform?}
+\label{sec:outlook}
+\markboth{Outlook: Three More Months}{}
+
+This question for Part~2 (value and policy iteration) is answered at the end of Section~\ref{sec:dp}; this section answers it for the policy-gradient experiments.
+
+\textbf{The algorithms look correct.} In both games, the agent learns, all checks of the implementation pass, the baselines reduce the gradient variance as predicted, and both Pong runs were still improving when training stopped. The main limitation is training time, especially for Pong, so most of the 3 months would go into longer and repeated runs, and into finding out which changes make learning faster.
+
+\subsection{CartPole (3a)}
+
+\begin{itemize}
+  \item \textbf{Remove the time limit.} The greedy evaluation is saturated at 500 steps, and Test 6 showed that the $\gamma = 0.995$ policy drifts towards the edge of the track and would probably fail in a longer episode. Evaluating with 5,000 or more steps would reveal such slow failures.
+  \item \textbf{Robustness to disturbances:} random pushes on the cart, noise on the observations, and different pole lengths or masses. This tests whether the policy really balances or just memorised the start states.
+  \item \textbf{Energy:} measure how much the cart moves (direction changes, distance travelled) and penalise wasted movement in the reward. A good policy should balance with as little movement as possible, and this would show whether the learned policies push back and forth unnecessarily.
+  \item \textbf{More seeds (e.g.\ 20)} for all variants, to get reliable confidence intervals for the differences in Parts 1 and 2.
+  \item \textbf{A learned critic for CartPole} as well, to compare it with the leave-one-out baseline on the same task.
+\end{itemize}
+
+\subsection{Pong (3b)}
+
+\begin{itemize}
+  \item \textbf{Train much longer.} Both runs were still improving after 2,000 episodes, and the actor-critic run was improving even faster at the end. Training for 10,000--20,000 episodes would show how good the agent gets, and whether it eventually wins games against the built-in opponent (reward $> 0$). Since the algorithm learns and all checks pass, this mainly needs time.
+  \item \textbf{Several seeds for both variants.} At $\sim$2.5\,h per run, 5 seeds per variant are feasible and would confirm that the baseline's advantage is not a lucky seed.
+  \item \textbf{Network architecture.} The current CNN has only 8 channels and two max-pooling layers, so the final feature map is only $18 \times 18$ for a ball of $1 \times 2$ pixels. This low resolution and the frame difference (which hides the paddle when it does not move) probably explain why the policy follows the ball's direction rather than its position (Part~1, Test 4). I would compare:
+  \begin{itemize}
+    \item two stacked frames instead of the difference (as the critic already uses), so the actor sees the paddle's position;
+    \item more channels, strided convolutions instead of pooling, or the full $160 \times 160$ resolution;
+    \item a small MLP on hand-extracted features (ball and paddle positions and velocities), as an upper bound on what the representation allows.
+  \end{itemize}
+  \item \textbf{Energy and actions:} add the no-op action, measure how much the paddle moves, and penalise wasted movement. Currently the paddle can never stand still, which makes it jitter around the ball.
+  \item \textbf{Hyperparameters:} learning rate, batch size, entropy coefficient, $\gamma$, and normalised advantages, each compared on learning speed.
+  \item \textbf{Better validation of the critic:} the Atari emulator can save and restore the game state. From saved states, many rollouts give the true value $V^\pi(s)$, which the critic's predictions can be compared with directly. With more batches, the unbiasedness test of Test 8 could also be made precise.
+  \item \textbf{Harder evaluation:} other game modes and difficulties of the opponent, and without sticky actions.
+\end{itemize}
+
+\subsection{More Advanced Methods (Both Games)}
+
+\begin{itemize}
+  \item \textbf{Better policy-gradient methods:} A2C with a TD($\lambda$) / GAE critic and parallel environments, and \textbf{PPO}, which reuses each batch for several clipped updates and is much more sample-efficient.
+  \item \textbf{Value-based and model-based methods:} DQN as the classic Atari baseline, and world-model methods such as \textbf{Dreamer}, which learn a model of the game and train the policy in imagination.
+  \item \textbf{Benchmark:} compare all variants (REINFORCE, the baselines, the architectures, A2C, PPO, DQN, Dreamer) on the same budget and several seeds, measuring the episodes, environment steps and wall-clock time needed to reach fixed rewards (e.g.\ $-15$, 0, $+15$ in Pong). This would show which modification learns fastest and is worth its extra complexity.
+\end{itemize}

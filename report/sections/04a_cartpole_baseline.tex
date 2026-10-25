@@ -1,0 +1,173 @@
+\section{Policy Gradient: Part 2 -- Baselines}
+\label{sec:pg2}
+
+Part~1 showed that plain REINFORCE learns, but with very noisy gradients. Subtracting a baseline $b$ from the returns does not change the expected gradient as long as $b$ does not depend on the action, because $\E\big[\nabla \log \pi(a_t \mid s_t)\, b\big] = 0$, but it can reduce its variance considerably. In this part, I repeat both experiments with a baseline: a leave-one-out average over a batch of episodes for CartPole, and a learned state-value network (actor-critic) for Pong.
+
+\subsection{3a) CartPole-v1 With a Baseline}
+
+\textbf{Setup:} I take the best configuration from Part~1 ($\gamma = 0.995$, cosine scheduler $0.01 \to 0.001$, reward shaping) and change only one thing: whether a baseline is subtracted from the returns. The baseline averages over several episodes, so \textbf{both} variants update the policy on batches of $N = 5$ episodes (200 updates for 1,000 episodes). Without a baseline, this is the Part~1 algorithm with batches. The scheduler is stepped once per update, i.e.\ over 200 steps. Evaluation is as in Part~1: 500 greedy episodes on the same start states.
+
+\subsubsection{Chosen Baseline and Implementation}
+
+\textbf{Non-constant baseline: the average return at the same step of the other episodes of the batch.} For episode $i$ at step $t$:
+\[
+  b_t^{(i)} = \frac{1}{N-1} \sum_{j \neq i} G_t^{(j)}, \qquad G_t^{(j)} = 0 \text{ if episode } j \text{ has already ended at step } t,
+\]
+and the loss becomes
+\[
+  -\frac{1}{N} \sum_i \sum_t \log \pi\big(a_t^{(i)} \mid s_t^{(i)}\big)\,\big(G_t^{(i)} - b_t^{(i)}\big).
+\]
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}p{3.6cm}L@{}}
+  \toprule
+  \textbf{Design choice} & \textbf{Reason} \\
+  \midrule
+  Per step instead of one constant & With $\gamma = 0.995$, the return falls steadily over an episode (Part~1, Test 1). One constant would be too small at the start and too large at the end of every episode. Comparing step $t$ with step $t$ of the other episodes removes this trend, so the advantage measures how much better than the others the episode is doing \emph{from this point on}. \\
+  Leave-one-out ($j \neq i$) & The baseline must not depend on the episode's own actions; otherwise the gradient is biased. Averaging only over the \emph{other} episodes guarantees this. \\
+  $G_t^{(j)} = 0$ after the end & An episode that has already failed collects no more reward. An episode that survives longer than the others therefore gets a positive advantage for its late steps. \\
+  A full batch of identical episodes gives no update & If all episodes reach the 500-step limit with the same rewards, all advantages are 0. With a constant baseline instead, the return shrinking towards the time limit would make the last steps of a successful episode look worse than average, and their (good) actions would be pushed down. \\
+  \bottomrule
+\end{tabularx}
+\end{center}
+
+\textbf{Implementation:} the returns of the batch are padded with zeros into an $N \times T_{\max}$ matrix. The leave-one-out mean at every step is $(\text{column sum} - \text{own row}) / (N-1)$; it is subtracted from each episode's returns and cut back to the episode's length. The same function also supports a constant baseline (mean return over all steps of the batch), which is only used for comparison in Test 8.
+
+\subsubsection{Training and Evaluation (Seed 0)}
+
+\fig{1.0}{3a_baseline_training.png}{CartPole training without (left) and with (right) the baseline, seed 0.}{fig:3a-bl-train}
+
+\begin{itemize}
+  \item \textbf{Without baseline:} the moving average reaches 475 at episode 576 and stays at $\sim$480 until episode 830. It then drops to $\sim$455 for about 100 episodes and ends at 477.
+  \item \textbf{With baseline:} it reaches 475 a bit later (episode 678), then 500 from episode $\sim$720 to $\sim$800. It only dips briefly to $\sim$473 and ends at $\sim$495. Late failures (the downward spikes) are rarer.
+\end{itemize}
+
+\fig{1.0}{3a_baseline_histogram.png}{Evaluation histograms without and with the baseline (500 greedy episodes each).}{fig:3a-bl-hist}
+
+\textbf{Evaluation:} both policies reach the limit in all 500 episodes: \textbf{mean = 500.0, std = 0.0} for both (Figure~\ref{fig:3a-bl-hist}). As in Part~1, the greedy evaluation of a single seed cannot separate the variants, so the comparison relies on 5 seeds.
+
+\subsubsection{Comparison Over 5 Seeds}
+
+\fig{0.7}{3a_baseline_seeds.png}{Mean training curve over 5 seeds, without and with the baseline (band: minimum to maximum).}{fig:3a-bl-seeds}
+
+\begin{center}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}llrrcr@{}}
+  \toprule
+  \thead[l]{Variant} & \thead[l]{Solved at\\(seeds 0--4)} & \thead[r]{Mean training\\reward} & \thead[r]{Mean of\\last 100} & \thead{Greedy evaluation\\(500 episodes)} & \thead[r]{Sampled eval.\\(100 episodes)} \\
+  \midrule
+  Without baseline & \makecell[l]{576, --, --,\\745, 893} & $240.1 \pm 52.6$ & $462.1 \pm 25.2$ & \makecell{500.0 (exactly 500\\for 4/5 seeds)} & 462.3 \\
+  \textbf{With baseline} & \makecell[l]{678, 831, 801,\\701, 715} & $\mathbf{281.7 \pm 27.7}$ & $\mathbf{484.0 \pm 10.5}$ & \makecell{\textbf{500.0}\\\textbf{(5/5 seeds)}} & \textbf{488.9} \\
+  \bottomrule
+\end{tabular}
+
+\footnotesize (-- = not solved within 1,000 episodes; $\pm$ = std over the 5 seeds)
+\end{center}
+
+\begin{itemize}
+  \item \textbf{The baseline helps consistently.} Without it, 2 of 5 seeds never reach the solved threshold; with it, all 5 do. The mean training reward is 17\% higher and the last 100 episodes are 22 points better.
+  \item \textbf{The seeds agree much more:} the std over seeds halves (52.6 $\to$ 27.7 over training, 25.2 $\to$ 10.5 at the end), and the min--max band is much narrower. This is the effect a lower-variance gradient should have: training depends less on which episodes happen to be sampled.
+  \item \textbf{The final policies are more robust:} with sampled actions, they reach 488.9 instead of 462.3.
+  \item \textbf{Batching alone costs speed.} The best Part~1 run (one update per episode, 1,000 updates) reached 475 at episodes 327--659 for all 5 seeds. With batches of 5, there are only 200 updates. The baseline recovers the reliability (5/5 solved, last 100 = 484.0 vs.\ 494.6 in Part~1), but not the speed. Within the fair comparison (both batched), the baseline is clearly better.
+\end{itemize}
+
+\subsubsection{Edge Cases}
+
+The edge cases of Part~1 (time limit, reward shaping, invalid $\gamma$, reproducibility) apply unchanged.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}p{3.6cm}L@{}}
+  \toprule
+  \textbf{Edge case} & \textbf{Handling} \\
+  \midrule
+  Episodes of different lengths & The returns are padded with 0 after an episode ends (Test 7), which is the true return after the end. \\
+  Batch of identical episodes & All advantages are exactly 0, so no update. This matters most at the time limit, when all episodes are truncated at 500 (Test 7). \\
+  Only one episode per batch & Leave-one-out has no other episode to average over, so a batch size of 1 with the per-step baseline raises an error (tested). \\
+  Batch size does not divide the episodes & Would silently drop the remaining episodes, so it raises an error (tested). An unknown baseline type is rejected as well. \\
+  Scheduler with batches & Stepped once per update, i.e.\ over $\text{episodes} / \text{batch size}$ steps; the learning rate ends exactly at 0.001 (tested). If it were scheduled over all episodes, it would only reach 0.0091. \\
+  Baseline must not bias the gradient & Leave-one-out: the baseline of an episode does not depend on that episode (Test 7). \\
+  Fair comparison & Same configuration, batch size, seeds and evaluation start states; only the baseline differs. \\
+  \bottomrule
+\end{tabularx}
+\end{center}
+
+\subsubsection{Tests for Validating Correctness}
+
+The tests continue the numbering of Part~1, and all of them pass.
+
+\textbf{7. Advantages on hand-made batches.} The advantage computation gives the expected result on batches with known answers ($\gamma = 0.995$, reward 1 per step):
+\begin{itemize}
+  \item 5 identical episodes of 500 steps: every per-step advantage is exactly 0 \pass.
+  \item \textbf{Leave-one-out:} replacing episode 0 by a longer one does not change its own baseline \pass.
+  \item After all other episodes have ended, the advantage of the longest episode equals its return \pass.
+  \item The constant baseline's advantages sum to 0 \pass; without a baseline, the advantages are the returns \pass.
+\end{itemize}
+
+Advantages for a batch with episode lengths 30, 80, 120, 200 and 60:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrrr@{}}
+  \toprule
+  \textbf{Episode (length)} & $t = 0$ & $t = 29$ & $t = 59$ & $t = 119$ & $t = 199$ \\
+  \midrule
+  0 (30) & $-55.8$ & $-64.6$ & -- & -- & -- \\
+  1 (80) & $-8.2$ & $-9.4$ & $-18.8$ & -- & -- \\
+  2 (120) & 22.3 & 25.7 & 22.1 & $-15.7$ & -- \\
+  3 (200) & 67.5 & 78.1 & 82.9 & 66.5 & 1.0 \\
+  4 (60) & $-25.8$ & $-29.8$ & $-42.5$ & -- & -- \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+Episodes that fail earlier than the others get negative advantages, and the longest episode gets positive ones. Without a baseline, every step of every episode would get a positive weight. Episode 2 turns negative near its end: its own remaining return goes towards 0, while episode 3 is still running and has a large return ahead.
+
+\textbf{8. Variance of the gradient estimate.} A baseline should lower the variance of the gradient estimate without changing its expected value. I measure this directly: for a \textbf{fixed} policy, I sample 50 batches of 5 episodes. On the same episodes, I compute each batch's gradient three times: without baseline, with a constant baseline (batch mean), and with the per-step baseline. The total variance is $\frac{1}{M}\sum_m \lVert g_m - \bar g \rVert^2$.
+
+\fig{0.7}{3a_baseline_gradient_variance.png}{Total variance of the gradient estimate without and with baselines.}{fig:3a-bl-var}
+
+\begin{center}
+\small
+\begin{tabular}{@{}llrrr@{}}
+  \toprule
+  \thead[l]{Policy} & \thead[l]{Baseline} & \thead[r]{Total\\variance} & \thead[r]{Relative\\to none} & \thead[r]{Cosine of mean\\gradient with none} \\
+  \midrule
+  Untrained & None & 138 & 1.000 & 1.000 \\
+  & Constant & 112 & 0.807 & 0.993 \\
+  & Per step & 132 & 0.953 & 0.988 \\
+  \addlinespace
+  \makecell[l]{Trained (without\\baseline, seed 0)} & None & $9.0 \cdot 10^5$ & 1.000 & 1.000 \\
+  & Constant & $1.3 \cdot 10^5$ & 0.148 & $-0.511$ \\
+  & Per step & $3.9 \cdot 10^4$ & \textbf{0.043} & $-0.256$ \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\begin{itemize}
+  \item \textbf{For the trained policy, the per-step baseline reduces the variance by a factor of 23} (the constant baseline by 7) \pass. Its episodes are long and all returns are large and positive (up to $\sim$114 with shaped rewards). Without a baseline, every action is pushed up with a large weight, and the gradient mainly reflects which actions happened to be sampled. The baseline removes this common part. The per-step version also removes the decline of the return within an episode, which the constant one cannot.
+  \item \textbf{For the untrained policy, the reduction is small} (factor 0.95) \pass. All episodes are short ($\sim$20 steps) with similar returns, so there is little common part to remove.
+  \item \textbf{Same direction:} for the untrained policy, the mean gradients with and without baseline point in the same direction (cosine 0.99) \pass, as expected for an unbiased baseline. For the trained policy, the cosine is negative. With a variance of $9 \cdot 10^5$, the mean of 50 batches without baseline still has a standard error of about $\sqrt{9 \cdot 10^5 / 50} \approx 134$ in norm. Near the optimum, the true gradient is small, so 50 batches cannot estimate its direction: this cosine is dominated by noise and not informative.
+\end{itemize}
+
+This is the mechanism behind the training results: the seeds without a baseline differ much more, because their gradient steps depend much more on chance.
+
+\FloatBarrier
+\begin{summarybox}{Summary of 3a, Part 2}
+\begin{tabularx}{\linewidth}{@{}Lrr@{}}
+  \toprule
+  & \textbf{Without baseline} & \textbf{With baseline (per step, leave-one-out)} \\
+  \midrule
+  Solved (5 seeds) & 3/5 & \textbf{5/5} \\
+  Mean of last 100 episodes (5 seeds) & $462.1 \pm 25.2$ & $\mathbf{484.0 \pm 10.5}$ \\
+  Sampled evaluation (5 seeds) & 462.3 & \textbf{488.9} \\
+  Greedy evaluation, seed 0 & $500.0 \pm 0.0$ & $500.0 \pm 0.0$ \\
+  Gradient variance, trained policy & 1 & \textbf{0.043} \\
+  \bottomrule
+\end{tabularx}
+
+\medskip
+The per-step baseline lowers the gradient variance by more than an order of magnitude once episodes get long. As a result, training is more reliable and consistent across seeds, and the final policies are more robust.
+\end{summarybox}

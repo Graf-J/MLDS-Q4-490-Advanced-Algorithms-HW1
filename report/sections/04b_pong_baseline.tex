@@ -1,0 +1,209 @@
+\FloatBarrier
+\subsection{3b) Pong-v5 With a Baseline}
+
+\textbf{Setup:} everything is identical to Part~1: network, frame difference, $\gamma = 0.99$, return restart after every point, learning rate 0.001, 5 episodes per update, entropy bonus, clipping, 2,000 episodes and seed 0. The only change is the weight of the log-probabilities in the actor's loss. Pong training is too slow for several seeds, so the comparison is \textbf{one run per variant} (see the limitation in the summary).
+
+\subsubsection{Chosen Baseline and Implementation}
+
+\textbf{Non-constant baseline: a learned state value $V(s_t)$ (actor-critic).} The actor is weighted with the advantage
+\[
+  A_t = G_t - V(s_t),
+\]
+where $V$ is a second network, the \emph{critic}, which learns to predict the return of the current rally.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}p{4.2cm}L@{}}
+  \toprule
+  \textbf{Design choice} & \textbf{Reason} \\
+  \midrule
+  Critic: same layers as the policy, own Adam optimizer (lr 0.001, clipped to norm 1) & Trained on the same Monte-Carlo returns with the loss $\frac{1}{T}\sum_t \big(V(s_t) - G_t\big)^2$, updated together with the actor every 5 episodes. \\
+  Monte-Carlo return $G_t$, not a bootstrapped TD target & $V(s_t)$ does not depend on the action $a_t$, so $\E\big[\nabla \log \pi(a_t \mid s_t)\, V(s_t)\big] = 0$: the expected gradient is the same as in Part~1, only its variance changes. A TD target would also reduce the variance, but bias the gradient. \\
+  Critic input: current frame \textbf{and} frame difference ($2 \times 80 \times 80$) & The value of a state depends on where the paddle is relative to the ball, which the frame difference alone mostly hides (Part~1, Test 4). Any input that does not depend on $a_t$ keeps the baseline unbiased. \\
+  $V$ is detached in the advantage & The actor's loss does not train the critic, and the critic's loss does not change the actor. \\
+  State-dependent instead of constant & Returns vary strongly within an episode: close to $-1$ just before a lost point, close to $+1$ before a won one. A constant cannot follow this; $V(s_t)$ can. \\
+  \bottomrule
+\end{tabularx}
+\end{center}
+
+\textbf{Implementation:} episodes are played exactly as in Part~1; the critic's inputs are additionally stored as 8-bit integers. After each episode, the critic computes $V(s_t)$ for all steps in chunks of 256 steps and accumulates its gradient. The actor's loss is then
+\[
+  -\sum_t \log \pi(a_t \mid s_t)\,\big(G_t - V(s_t)\big) \;-\; 0.01 \sum_t \mathcal{H}_t ,
+\]
+and every 5 episodes both networks are clipped and updated.
+
+\subsubsection{Training and Evaluation}
+
+\fig{1.0}{3b_baseline_training.png}{Pong training without (left) and with (right) the learned baseline: episode reward and its moving average over 100 episodes.}{fig:3b-bl-train}
+
+\fig{1.0}{3b_baseline_comparison.png}{Moving averages over 100 episodes of the reward, the episode length and the standard deviation of $P(\text{down})$, without and with the baseline.}{fig:3b-bl-comp}
+
+\begin{itemize}
+  \item \textbf{Learning starts much earlier.} With the baseline, the policy starts reacting to the screen (std of $P(\text{down})$) at episode $\sim$250 instead of $\sim$750, and the reward rises from the start. The moving average reaches $-19.5$ at episode \textbf{990 instead of 1,530} (Figure~\ref{fig:3b-bl-comp}).
+  \item \textbf{It learns faster for the whole run.} The last 100 episodes reach \textbf{$-14.93$ instead of $-18.07$}, and the rallies are 50\% longer (3,028 vs.\ 2,065 steps).
+  \item \textbf{Still improving at the end,} even more steeply than without baseline.
+\end{itemize}
+
+\fig{1.0}{3b_baseline_histogram.png}{Evaluation histograms without and with the baseline (500 episodes with sampled actions each).}{fig:3b-bl-hist}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrr@{}}
+  \toprule
+  & \textbf{Without baseline} & \textbf{With baseline (actor-critic)} \\
+  \midrule
+  Mean training reward & $-19.83$ & $\mathbf{-18.74}$ \\
+  Reward, last 100 training episodes & $-18.07$ & $\mathbf{-14.93}$ \\
+  Moving average reaches $-19.5$ at episode & 1,530 & \textbf{990} \\
+  \textbf{Evaluation, sampled (500 episodes)} & $\mathbf{-17.66 \pm 1.86}$ & $\mathbf{-13.27 \pm 2.87}$ \\
+  Evaluation, greedy (50 episodes) & $-15.68 \pm 2.37$ & $\mathbf{-10.22 \pm 3.33}$ \\
+  Greedy: points won per game / length & 5.3 / 2,960 & \textbf{10.8 / 3,847} \\
+  \emph{Reference:} random / ball tracker (Part~1, Test 3) & $-20.40$ / $-14.74$ & \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\begin{itemize}
+  \item \textbf{The evaluation improves by 4.4 points} (Figure~\ref{fig:3b-bl-hist}). Every one of the 500 episodes is better than the random policy, and the best one reaches $-1$. The policy still loses every game.
+  \item \textbf{It now beats the hand-coded ball tracker} ($-13.27$ sampled, $-10.22$ greedy, vs.\ $-14.74$). Without the baseline, it stayed clearly below it.
+  \item \textbf{The larger std (2.87 vs.\ 1.86)} mostly reflects the wider range of results: a better player has more room between losing 21:0 and winning many points.
+\end{itemize}
+
+\subsubsection{What the Critic Learns}
+
+\fig{1.0}{3b_baseline_critic.png}{The critic during training: its loss, its explained variance, and the mean absolute weight of the actor's update with and without baseline.}{fig:3b-bl-critic}
+
+\begin{itemize}
+  \item \textbf{First, the critic learns the average return.} Its loss drops from 0.8 to $\sim$0.12 within $\sim$150 episodes (Figure~\ref{fig:3b-bl-critic}). Most returns are negative (the agent loses most points), and subtracting this average alone shrinks the actor's weights from a mean $|G_t|$ of $\sim$0.78 to a mean $|A_t|$ of $\sim$0.22 within the first 200 episodes.
+  \item \textbf{Then it learns to tell states apart.} The explained variance $1 - \Var(G - V)/\Var(G)$ stays below 0.05 for the first 1,000 episodes and rises to \textbf{0.26} over the last 100. The critic increasingly predicts \emph{which} rallies will be won.
+  \item \textbf{The critic's loss rises slowly again} ($0.12 \to 0.21$). As the agent wins more points, the returns spread over the whole range from $-1$ to $+1$ and become harder to predict.
+\end{itemize}
+
+\fig{1.0}{3b_baseline_policy_response.png}{Direction gap (left) and position gap (right) over training, without and with the baseline.}{fig:3b-bl-response}
+
+\begin{center}
+\small
+\begin{tabular}{@{}rrrrr@{}}
+  \toprule
+  & \multicolumn{2}{c}{\textbf{Direction gap}} & \multicolumn{2}{c}{\textbf{Position gap}} \\
+  \cmidrule(lr){2-3} \cmidrule(l){4-5}
+  \textbf{Checkpoint} & \textbf{Without} & \textbf{With baseline} & \textbf{Without} & \textbf{With baseline} \\
+  \midrule
+  250 & 0.000 & $\mathbf{+0.015}$ & 0.000 & $+0.006$ \\
+  500 & $+0.003$ & $\mathbf{+0.095}$ & $+0.001$ & $-0.008$ \\
+  1,000 & $+0.095$ & $+0.064$ & $-0.027$ & $-0.009$ \\
+  1,500 & $+0.089$ & $+0.057$ & $-0.073$ & $+0.001$ \\
+  2,000 & $+0.085$ & $+0.060$ & $-0.057$ & $\mathbf{+0.044}$ \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\begin{itemize}
+  \item \textbf{The direction gap appears about 500 episodes earlier} (+0.095 at episode 500, a level Part~1 only reaches at episode 1,000; Figure~\ref{fig:3b-bl-response}). It is the same feature as in Part~1, learned faster.
+  \item \textbf{The position gap becomes positive at the end} (+0.044 at episode 2,000, vs.\ $-0.057$ without baseline). This is a first sign that the policy also starts moving \emph{towards} the ball, but it is below the threshold of 0.05 used in Part~1 and based on 8 episodes, so it is only a hint.
+\end{itemize}
+
+\subsubsection{Edge Cases}
+
+The edge cases of Part~1 (sparse rewards, frame difference, saturation, end of an episode, sticky actions) apply unchanged.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}p{3.6cm}L@{}}
+  \toprule
+  \textbf{Edge case} & \textbf{Handling} \\
+  \midrule
+  Biased baseline & A baseline must not depend on the action $a_t$. The critic only sees the frames \emph{before} $a_t$, and its value is detached in the advantage (tested). The Monte-Carlo target keeps the gradient unbiased. \\
+  Untrained critic at the start & The untrained critic predicts $\sim$+0.09, while the returns average $\sim$$-0.76$. For the first $\sim$100 episodes it is therefore a bad baseline: the mean $|A_t|$ is even slightly larger than $|G_t|$, and the gradient variance is 1.2$\times$ that without baseline (Test 8). It learns the average within $\sim$150 episodes. I did not pre-train the critic, so both runs start identically. \\
+  Critic lags behind the improving policy & The critic is trained on returns of earlier, worse policies, so it is too pessimistic (mean $V$ $-0.44$ vs.\ mean $G$ $-0.25$, Test 7). This does not bias the gradient; it only makes the variance reduction smaller than with a perfect critic. \\
+  Unbounded critic output & $G_t \in [-1, 1]$, but the critic's output is not bounded. 1\% of its predictions lie outside $[-1, 1]$ (lowest $-1.41$). As a baseline this is harmless, so I did not add a $\tanh$. \\
+  Long episodes (up to $\sim$4,000 steps) & The critic's forward and backward pass runs in chunks of 256 steps, and its inputs are stored as 8-bit integers (12.8\,KB per step). The chunked pass gives exactly the same values, loss and gradients as one pass (tested). \\
+  Fair comparison & Same seed and same initial actor weights. The critic is initialised without consuming the random numbers used for sampling, so the first 5 episodes (before the first update) are identical to Part~1 (tested). \\
+  Wrong optimizer & A critic optimizer that does not optimise exactly the critic's parameters would silently leave the critic untrained. It raises an error (tested), as do the invalid inputs of Part~1. \\
+  Reproducibility & Training twice with the same seed gives identical results, including the critic's loss (tested). \\
+  \bottomrule
+\end{tabularx}
+\end{center}
+
+\subsubsection{Tests for Validating Correctness}
+
+The tests continue the numbering of Part~1, and \textbf{all of them pass}.
+
+\textbf{6. Fair setup and advantage computation.}
+\begin{itemize}
+  \item The actor starts from exactly the same weights as in Part~1, and the first 5 episodes are identical (rewards $-20, -21, -21, -21, -21$) \pass. Every later difference is caused by the baseline.
+  \item The values in the advantage carry no gradient \pass.
+  \item The chunked critic pass equals a single pass (values, loss and gradients) \pass.
+  \item The explained variance is 1 for $V = G$ and 0 for $V = \bar G$ \pass.
+\end{itemize}
+
+\textbf{7. Does the critic predict the return?} 10 episodes of the final actor, evaluated with the untrained and the final critic on the same steps (Figure~\ref{fig:3b-bl-values}):
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrr@{}}
+  \toprule
+  & \textbf{Untrained critic} & \textbf{Final critic} \\
+  \midrule
+  Explained variance & 0.000 & \textbf{0.325} \pass \\
+  Mean $V$ over the 20 steps before a \textbf{won} point (91 points) & & \textbf{+0.10} \\
+  Mean $V$ over the 20 steps before a \textbf{lost} point (210 points) & & $\mathbf{-0.61}$ \pass \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\fig{1.0}{3b_baseline_values.png}{Return and critic prediction in a test episode (left), and calibration of the final critic (right).}{fig:3b-bl-values}
+
+\begin{itemize}
+  \item The final critic clearly separates rallies that will be won from those that will be lost, and in the test episode its value rises before every won point.
+  \item \textbf{Calibration:} the actual return increases monotonically with the predicted value (all 10 deciles), but lies 0.2--0.4 above it. The critic is too pessimistic, because it lags behind the improving policy (see the edge cases).
+\end{itemize}
+
+\textbf{8. Variance of the gradient estimate.} As for CartPole: for a fixed actor and critic, 20 batches of 5 episodes, with the gradient of every batch computed on the same episodes without baseline, with a constant baseline (the batch's mean return) and with the critic. The entropy term is left out.
+
+\fig{0.7}{3b_baseline_gradient_variance.png}{Total variance of the gradient estimate for the initial and the final actor-critic checkpoint.}{fig:3b-bl-var}
+
+\begin{center}
+\small
+\begin{tabular}{@{}llrrr@{}}
+  \toprule
+  \thead[l]{Checkpoint} & \thead[l]{Baseline} & \thead[r]{Total\\variance} & \thead[r]{Relative\\to none} & \thead[r]{Cosine of mean\\gradient with none} \\
+  \midrule
+  After 0 episodes & None & $3.5 \cdot 10^3$ & 1.00 & 1.00 \\
+  & Constant (batch mean) & $5.3 \cdot 10^2$ & 0.15 & 0.70 \\
+  & Critic (untrained) & $4.2 \cdot 10^3$ & 1.20 & 1.00 \\
+  \addlinespace
+  After 2,000 episodes & None & $4.7 \cdot 10^5$ & 1.00 & 1.00 \\
+  & Constant (batch mean) & $2.5 \cdot 10^5$ & 0.52 & 0.99 \\
+  & \textbf{Critic (trained)} & $\mathbf{1.4 \cdot 10^5}$ & \textbf{0.29} \pass & 0.96 \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\begin{itemize}
+  \item \textbf{The trained critic reduces the variance by a factor of 3.5}, clearly more than the constant baseline (factor 1.9) \pass. Once the agent wins points, a constant cannot follow the returns, which now vary between rallies.
+  \item \textbf{At the start, the constant baseline is better and the untrained critic slightly harmful.} Almost all returns are negative, so their mean removes most of the noise; the untrained critic subtracts the wrong constant (+0.09). This is the same effect as in the edge cases. During training, the critic learns this mean within the first $\sim$150 episodes.
+  \item \textbf{Same direction:} the mean gradients with the baselines point in the same direction as without (cosine 0.96--1.00), as expected for unbiased baselines. With 20 batches this is only a rough check; the 0.70 of the constant baseline at the start comes from the noise of the untrained policy's small gradient.
+  \item The variance grows $\sim$130$\times$ over training, because episodes are $\sim$3$\times$ longer and the policy's gradients larger (Part~1, Figure~\ref{fig:3b-diag}).
+\end{itemize}
+
+\FloatBarrier
+\begin{summarybox}{Summary of 3b, Part 2}
+\begin{tabularx}{\linewidth}{@{}Lrr@{}}
+  \toprule
+  & \textbf{Without baseline} & \textbf{With baseline (actor-critic)} \\
+  \midrule
+  Policy starts reacting to the screen & episode $\sim$750 & \textbf{episode $\sim$250} \\
+  Moving average reaches $-19.5$ & episode 1,530 & \textbf{episode 990} \\
+  Reward, last 100 training episodes & $-18.07$ & $\mathbf{-14.93}$ \\
+  Evaluation, sampled (500 episodes) & $-17.66 \pm 1.86$ & $\mathbf{-13.27 \pm 2.87}$ \\
+  Evaluation, greedy (50 episodes) & $-15.68 \pm 2.37$ & $\mathbf{-10.22 \pm 3.33}$ \\
+  Gradient variance, final policy & 1 & \textbf{0.29} \\
+  \bottomrule
+\end{tabularx}
+
+\medskip
+The learned baseline makes REINFORCE on Pong learn much faster: the policy starts reacting to the ball about 500 episodes earlier, and after the same 2,000 episodes it wins about twice as many points and beats the hand-coded ball tracker. The critic learns first the average return and later which rallies will be won, and in the end reduces the gradient variance by a factor of 3.5.
+
+\textbf{Limitation:} this is a single run per variant. The difference is large and consistent over the whole run, but without several seeds I cannot quantify how much of it depends on the seed.
+\end{summarybox}

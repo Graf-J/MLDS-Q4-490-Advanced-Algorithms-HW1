@@ -1,0 +1,203 @@
+\FloatBarrier
+\subsection{3b) Pong-v5}
+
+Pong is much harder than CartPole: the policy sees raw frames instead of four state variables, a point is scored only every few dozen steps, and an episode lasts until one side has 21 points.
+
+\textbf{Method:} REINFORCE without a baseline, $\gamma = 0.99$.
+\begin{itemize}
+  \item \textbf{Actions:} only 2 (\action{Right}) and 3 (\action{Left}), as required. In Pong they move the paddle \textbf{up} and \textbf{down} (Test 2), so I call them that.
+  \item \textbf{Input:} the difference of two consecutive frames, each preprocessed with the given preprocessing function ($80 \times 80$, values 0/1). A single frame shows where the ball is, but not where it is going. The difference shows moving objects as a $+1/-1$ pair, which encodes the direction (Test 2).
+  \item \textbf{Policy network:} Conv($1 \to 8$, $3 \times 3$) $\to$ ReLU $\to$ MaxPool(2) $\to$ Conv($8 \to 8$, $3 \times 3$) $\to$ ReLU $\to$ MaxPool(2) $\to$ Linear($2592 \to 64$) $\to$ ReLU $\to$ Linear($64 \to 1$), giving the logit of $P(\text{down})$. Actions are sampled from this Bernoulli distribution.
+  \item \textbf{Loss:} $-\sum_t \log \pi(a_t \mid s_t)\, G_t \;-\; 0.01 \sum_t \mathcal{H}[\pi(\cdot \mid s_t)]$, with Adam (learning rate 0.001). The returns are not normalised and no baseline is subtracted.
+  \item \textbf{Training:} 2,000 episodes. Gradients are accumulated over 5 episodes per optimizer step and clipped to norm 1.
+  \item \textbf{Evaluation:} 500 episodes with actions sampled from the policy, as during training. Episode $i$ starts from seed $i$.
+\end{itemize}
+
+\subsubsection{Deviations from the Plain Algorithm and Why}
+
+None of these is a baseline: the learning signal is still the raw discounted return of each action.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}p{3.9cm}L@{}}
+  \toprule
+  \textbf{Change} & \textbf{Reason} \\
+  \midrule
+  Return restarts after every point & $G_t$ only contains the point of the current rally: $G_t = \gamma^{k} r_{t+k}$, where $t + k$ is the next step with a reward. With the plain discounted sum, an action would also be credited with later rallies it has no influence on. \\
+  Learning rate 0.001 instead of 0.01 & See the development runs below. \\
+  5 episodes per update & Averages the very noisy gradient of single episodes. \\
+  Entropy bonus (0.01) & Keeps the policy from saturating at one action, after which the gradient vanishes. \\
+  Gradient clipping (norm 1) & The norm before clipping is between $\sim$3 and $\sim$800, so clipping is active in every update (Figure~\ref{fig:3b-diag}). It keeps the direction and rescales every update to norm 1, so every batch counts equally. Adam is insensitive to the overall scale of the gradients anyway, so the growing norm does not change the step size. \\
+  Bernoulli distribution parameterised by the logit instead of the probability & Exact log-probabilities when the policy saturates (see the edge cases). \\
+  \bottomrule
+\end{tabularx}
+\end{center}
+
+\textbf{Development runs} (short runs before the final one):
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}Lrl@{}}
+  \toprule
+  \textbf{Setting} & \textbf{Episodes} & \textbf{Result} \\
+  \midrule
+  Single frame as input, lr 0.01, update every episode & 500 & Reward stays at about $-21$ \\
+  Frame difference, lr 0.001, update every episode & 500 & Reward stays at about $-21$ \\
+  + lr 0.0001, 10 episodes per update, entropy bonus, clipping & 500 & \parbox[t]{5.2cm}{$P(\text{down})$ stays at 0.49--0.51: the policy barely changes} \\
+  lr 0.001, 5 episodes per update (final settings) & 300 & \parbox[t]{5.2cm}{Std of $P(\text{down})$ within an episode rises from 0.001 to 0.013: the policy starts to react to the screen} \\
+  \bottomrule
+\end{tabularx}
+\end{center}
+
+\subsubsection{Training}
+
+\fig{0.78}{3b_training.png}{Training of REINFORCE without baseline on Pong: episode reward and its moving average over 100 episodes.}{fig:3b-train}
+
+\begin{itemize}
+  \item \textbf{Learning starts late but then continues.} The moving average stays at about $-20.5$ for the first $\sim$700 episodes and then rises steadily to \textbf{$-18.1$ over the last 100 episodes} (first 100: $-20.6$).
+  \item \textbf{It has not converged.} The largest gain comes in the last 500 episodes, so the 2,000-episode budget, not convergence, limits the result.
+\end{itemize}
+
+\fig{0.95}{3b_training_diagnostics.png}{Training diagnostics: episode length, mean and standard deviation of $P(\text{down})$ within each episode, and the gradient norm before clipping.}{fig:3b-diag}
+
+The diagnostics in Figure~\ref{fig:3b-diag} show \emph{how} learning happens, before it is visible in the reward:
+\begin{itemize}
+  \item \textbf{Std of $P(\text{down})$ within an episode:} below 0.01 for the first $\sim$700 episodes, i.e.\ the policy outputs the same probability whatever the screen shows. It then rises to 0.23. The policy only starts to depend on the state from episode $\sim$750, which is exactly when reward and episode length start to rise.
+  \item \textbf{Mean $P(\text{down})$} stays between 0.4 and 0.6, so the policy never collapses to a single action. The initial bias of the random network (0.58) is removed within $\sim$100 episodes.
+  \item \textbf{Episode length} doubles from $\sim$1,000 to $\sim$2,100 steps: the agent returns the ball more often, so rallies last longer.
+  \item \textbf{Gradient norm} grows from $\sim$35 to $\sim$235 (median of the first and last 50 updates). The loss is a sum over all steps of 5 episodes, so longer episodes add more terms, which explains at most a factor of $\sim$2. The rest is probably because the policy now reacts consistently: early on, the steps push in random directions and mostly cancel; later, many steps push the same weights in the same direction. This does not affect training, since clipping and Adam make the step size independent of the gradient norm.
+\end{itemize}
+
+\subsubsection{Evaluation}
+
+\fig{0.6}{3b_histogram.png}{Evaluation of REINFORCE without baseline: 500 episodes with sampled actions.}{fig:3b-hist}
+
+\textbf{Mean = $-17.66$, std = 1.86} over 500 episodes (Figure~\ref{fig:3b-hist}). 95\% of the episodes score better than the random policy ($-20.4$), and the best episode reaches $-10$. The policy wins about 3 points per game, but still loses every game.
+
+\subsubsection{Edge Cases}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}p{3.6cm}L@{}}
+  \toprule
+  \textbf{Edge case} & \textbf{Handling} \\
+  \midrule
+  Sparse rewards & Only every $\sim$95 steps (median rally of the trained policy) is a reward $\neq 0$. The return restart keeps every return in $[-1, 1]$ and assigns each point only to its rally (Test 1). \\
+  No motion in a single frame & The frame difference shows direction and speed. In the first step of an episode it is all 0 (tested). \\
+  Restricted action space & Only actions 2 and 3; there is no ``stay'' action, so the paddle is always moving. \\
+  Preprocessing modifies its input & The given function writes into a view of the observation. I copy the frame first, so the observation of the environment stays unchanged (tested). \\
+  Saturated policy & A Bernoulli distribution with probability $\sigma(50)$ gives $\log P(\text{up}) = -15.9$, because PyTorch clamps the probability; the exact value is $-50$. Parameterised by the logit, it is exact (tested). The entropy bonus keeps the policy away from saturation. \\
+  End of an episode & Pong-v5 has no relevant step limit (108,000 frames). Every one of 800 evaluation episodes ends by termination when one side has 21 points (tested). \\
+  Sticky actions & Pong-v5 repeats the previous action with probability 0.25, so games are random even for a fixed policy. Seeding PyTorch and the first environment reset makes training reproducible: training twice gives identical results (tested). \\
+  Invalid arguments & A non-positive number of episodes or of episodes per update, and $\gamma \notin (0, 1]$ raise an error (tested). \\
+  Long training & The policy and the training log are saved every 250 episodes, so a crash loses at most 250 episodes. \\
+  \bottomrule
+\end{tabularx}
+\end{center}
+
+\subsubsection{Tests for Validating Correctness}
+
+The tests reuse the trained policy and its saved checkpoints. \textbf{All pass except two}, which test a behaviour the policy has not learned (Tests 4 and 5, explained there).
+
+\textbf{1. Returns and credit assignment.} A single final reward gives $G_t = \gamma^{T-1-t}$, and with two rallies $[0, 0, -1, 0, 0, +1]$, the first rally only sees its own point: $[-\gamma^2, -\gamma, -1, \gamma^2, \gamma, 1]$ \pass. In a real 2,837-step episode, $|G_t| \le 1$ at every step \pass.
+
+\fig{0.8}{3b_returns.png}{Returns in the first 400 steps of an evaluation episode.}{fig:3b-returns}
+
+With a median rally of 95 steps, $\gamma^{95} = 0.38$: the first action of a rally still gets 38\% of the credit for its point (Figure~\ref{fig:3b-returns}).
+
+\textbf{2. Preprocessing, frame difference and actions.} The preprocessed frame only contains 0/1 and the difference only $-1/0/+1$ \pass. Action 2 moves the paddle to the top ($y = 2$ of 158), action 3 to the bottom ($y = 156$) \pass.
+
+\fig{0.95}{3b_preprocessing.png}{Raw frame, preprocessed frame and frame difference (the network's input).}{fig:3b-prep}
+
+In the difference, the background disappears, and the ball and both paddles appear as $+1/-1$ pairs. The player's paddle is only visible while it moves (Figure~\ref{fig:3b-prep}).
+
+\textbf{3. Comparison with reference policies} (50 episodes each, same start states; Figure~\ref{fig:3b-ref}):
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrr@{}}
+  \toprule
+  \textbf{Policy} & \textbf{Reward} & \textbf{Length (steps)} & \textbf{Points won} \\
+  \midrule
+  Always up / always down & $-21.00 \pm 0.00$ & 764 & 0 \\
+  Random & $-20.40 \pm 0.75$ & 1,024 & 0.6 \\
+  Ball tracker (hand-coded) & $-14.74 \pm 2.16$ & 3,876 & 6.3 \\
+  \textbf{Trained, sampled} (first 50 evaluation episodes) & $\mathbf{-18.02 \pm 1.83}$ & 2,217 & 3.0 \\
+  Trained, greedy & $-15.68 \pm 2.37$ & 2,960 & 5.3 \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\fig{1.0}{3b_reference_policies.png}{Reference policies vs.\ the trained policy (50 episodes each).}{fig:3b-ref}
+
+\begin{itemize}
+  \item The \emph{ball tracker} is not trained. It always moves the paddle towards the ball, using the ball and paddle positions read from the pixels. It shows what the two actions can achieve and serves as a reference.
+  \item \textbf{The trained policy is clearly better than random} \pass{} and closes a bit less than half of the gap between random and the ball tracker.
+  \item \textbf{Even the ball tracker loses}, because returning the ball is not enough: a point is only won when the opponent misses, which requires steep shots off the edge of the paddle.
+  \item \textbf{The greedy policy is better than the sampled one} ($-15.68$ vs.\ $-18.02$). I chose sampled actions for the main evaluation before training, because a policy that is still close to 0.5 everywhere can turn into ``always the same action'' when acted on greedily. After training, the policy is decisive enough that removing the sampling noise helps.
+\end{itemize}
+
+\textbf{4. Does the policy react to the ball?} For every saved checkpoint (8 episodes each), I compare $P(\text{down})$ in two pairs of situations:
+\begin{itemize}
+  \item \textbf{Direction gap:} ball moving down vs.\ ball moving up. The frame difference shows this directly.
+  \item \textbf{Position gap:} ball below vs.\ above the paddle (by more than 10 pixels), only while the ball approaches the player.
+\end{itemize}
+Both gaps are 0 for a policy that ignores the ball. I use gaps instead of correlations, because while $P(\text{down})$ barely varies, a correlation only measures noise.
+
+\fig{1.0}{3b_policy_response.png}{Mean $P(\text{down})$ depending on the ball (left), and the direction and position gaps over training (right).}{fig:3b-response}
+
+\begin{center}
+\small
+\begin{tabular}{@{}l*{6}{r}@{}}
+  \toprule
+  \textbf{Checkpoint} & 0 & 500 & 750 & 1,000 & 1,500 & 2,000 \\
+  \midrule
+  Direction gap & 0.000 & $+0.003$ & $+0.026$ & $+0.095$ & $+0.089$ & $\mathbf{+0.085}$ \\
+  Position gap & 0.000 & $+0.001$ & $+0.015$ & $-0.027$ & $-0.073$ & $\mathbf{-0.057}$ \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\begin{itemize}
+  \item \textbf{Initial policy ignores the ball} (both gaps 0) \pass.
+  \item \textbf{The policy learns to move with the ball's vertical direction} \pass. The direction gap appears at episode 750, exactly when the std of $P(\text{down})$ and the reward start to rise.
+  \item \fail{} \textbf{It does not learn to move towards the ball's position.} The position gap never becomes clearly positive and is even negative at the end. This is a property of the learned policy, not a bug in the check: the check is 0 for the untrained policy and works with the same position data that make the ball tracker succeed. The likely reason is the input: the ball's direction is directly visible in the frame difference, but the paddle only appears in it while it moves, so ``ball above or below the paddle'' is much harder to learn. Following the ball's direction keeps the paddle roughly in line with the ball, which explains the longer rallies. It also explains why the policy stays far below the ball tracker.
+\end{itemize}
+
+\textbf{5. First 10 steps.} The 10 steps before the first point of the first evaluation episode:
+
+\begin{center}
+\small
+\setlength{\tabcolsep}{4.5pt}
+\begin{tabular}{@{}l*{10}{r}@{}}
+  \toprule
+  $t$ & 54 & 55 & 56 & 57 & 58 & 59 & 60 & 61 & 62 & 63 \\
+  \midrule
+  Ball $-$ paddle (px) & $-79$ & $-53$ & $-43$ & $-32$ & $-26$ & $-36$ & $-50$ & $-44$ & $-20$ & $-10$ \\
+  $P(\text{down})$ & 0.24 & 0.21 & 0.32 & 0.56 & 0.62 & 0.62 & 0.67 & 0.69 & 0.60 & 0.75 \\
+  Action & up & down & up & down & down & down & up & up & down & down \\
+  Reward & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & $-1$ \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\begin{itemize}
+  \item \fail{} \textbf{The more likely action points towards the ball in only 3 of 10 steps.} The ball is above the paddle the whole time but moving down (its $y$ rises from 50 to 121). $P(\text{down})$ rises with it, from 0.24 to 0.75, so the policy follows the ball's motion, not its position: the same behaviour as in Test 4.
+  \item The paddle therefore moves down with the ball instead of waiting for it, and the point is lost.
+\end{itemize}
+
+\FloatBarrier
+\begin{summarybox}{Summary of 3b}
+\begin{tabularx}{\linewidth}{@{}p{0.42\linewidth}L@{}}
+  \toprule
+  Training reward, first / last 100 episodes & $-20.57$ / $-18.07$ \\
+  Episode length, first / last 100 episodes & 993 / 2,065 steps \\
+  Evaluation (500 episodes, sampled) & $\mathbf{-17.66 \pm 1.86}$ \\
+  Reference: random / ball tracker & $-20.40$ / $-14.74$ \\
+  Learned behaviour & Moves with the ball's vertical direction, not towards its position \\
+  \bottomrule
+\end{tabularx}
+
+\medskip
+REINFORCE without a baseline learns Pong, but slowly: for the first $\sim$700 of 2,000 episodes the policy does not react to the screen at all. It then learns the feature that is easiest to see in the frame difference, the ball's direction, and doubles the rally length. It still loses every game and was still improving when training ended.
+\end{summarybox}

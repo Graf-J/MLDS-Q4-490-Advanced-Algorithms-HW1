@@ -1,0 +1,42 @@
+\section{Repository and How to Run the Code}
+
+\begin{tabularx}{\textwidth}{@{}lL@{}}
+  \textbf{GitHub username} & Graf-J \\
+  \textbf{Repository} & \href{https://github.com/Graf-J/MLDS-Q4-490-Advanced-Algorithms-HW1}{\texttt{github.com/Graf-J/MLDS-Q4-490-Advanced-Algorithms-HW1}} (public)
+\end{tabularx}
+
+The project uses \href{https://docs.astral.sh/uv/}{uv} for Python~3.14 and its dependencies:
+
+\begin{lstlisting}
+git clone https://github.com/Graf-J/MLDS-Q4-490-Advanced-Algorithms-HW1.git
+cd MLDS-Q4-490-Advanced-Algorithms-HW1
+uv sync             # creates .venv with the exact versions from uv.lock
+uv run jupyter lab  # or open the notebooks in VS Code with the .venv kernel
+\end{lstlisting}
+
+Every part of the assignment is one Jupyter notebook that runs from top to bottom. The dynamic-programming solvers of Section~\ref{sec:dp} live in \texttt{src/} and are shared by the notebooks; all figures are written to \texttt{report/figures/}.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}l l L@{}}
+  \toprule
+  \textbf{Part} & \textbf{Notebook} & \textbf{Code and runtime} \\
+  \midrule
+  2: Environment & \texttt{2\_ValidateEnvironment.ipynb} & Environment in \texttt{src/environments/shuttleenvironment.py} \\
+  2a: Enumeration & \texttt{2a\_Enumeration.ipynb} & Solver in \texttt{src/solvers/shuttleenumeration.py}; the solve takes about 6\,s \\
+  2b: Value iteration & \texttt{2b\_ValueIteration.ipynb} & Solver in \texttt{src/solvers/shuttlevalueiteration.py} \\
+  2c: Policy iteration & \texttt{2c\_PolicyIteration.ipynb} & Solver in \texttt{src/solvers/shuttlepolicyiteration.py} \\
+  \midrule
+  3a: CartPole & \texttt{3a\_CartPole-v1.ipynb} & Part~1: four trainings about 12\,min, seed experiment another 45\,min. Part~2 (baseline): training about 30\,min, checks about 3\,min; it only needs the definition cells of Part~1. \\
+  3b: Pong & \texttt{3b\_Pong-v5.ipynb} & Part~1: training about 100\,min, evaluation and checks about 30\,min. Part~2 (baseline): training about 2\,h\,45\,min, evaluation and checks about 80\,min; it only needs the definition cells of Part~1. \\
+  \bottomrule
+\end{tabularx}
+\end{center}
+
+\begin{sloppypar}
+\textbf{Pong without retraining.} The Pong runs are saved every 250 episodes to \texttt{checkpoints/3b/reinforce/} and \texttt{checkpoints/3b/actor\_critic/} (policy, critic and training log), so a crash loses at most 250 episodes. With the default flags \texttt{RETRAIN = False} and \texttt{RECOMPUTE = False}, the notebook loads the finished runs and the cached evaluations and checks instead of computing them again.
+\end{sloppypar}
+
+\begin{notebox}
+\textbf{Validation tests.} Every validation test described in this report is implemented as a check in the \emph{Checks} section of the corresponding notebook. The checks run together with the notebook and print \texttt{[PASS]} or \texttt{[FAIL]}; in this report, a passed check is marked with~\pass{} and a failed one with~\fail.
+\end{notebox}
